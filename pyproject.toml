@@ -143,9 +143,9 @@ dev = [
 ]
 
 [tool.uv]
-# Keep this exact pin in sync with docker/Dockerfile and docker/Dockerfile.lambda
-# so local, CI, release, and container builds use the same uv version.
-required-version = "==0.12.10"
+# Fork: range instead of an exact pin so the Heroku Python buildpack's bundled uv
+# (e.g. 0.12.21) can build. Docker images still pin uv 0.12.10 in docker/Dockerfile*.
+required-version = ">=0.12.10,<0.13"
 
 [tool.ruff]
 line-length = 120

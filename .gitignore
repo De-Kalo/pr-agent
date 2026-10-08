@@ -21,3 +21,6 @@ docs/site/
 .qodo
 poetry.lock
 .log
+
+# GitHub App private keys (never commit)
+*.pem
