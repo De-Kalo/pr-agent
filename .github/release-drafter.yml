@@ -1,0 +1,100 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
+
+categories:
+  - title: '🚀 Features'
+    when:
+      labels:
+        - feature
+        - enhancement
+  - title: '🐛 Bug Fixes'
+    when:
+      labels:
+        - bug
+        - 'Bug fix'
+        - 'Bug fix with tests'
+  - title: '⚡ Performance'
+    when:
+      labels:
+        - performance
+  - title: '📚 Documentation'
+    when:
+      labels:
+        - documentation
+        - 'Includes Documentation'
+  - title: '🧹 Maintenance'
+    when:
+      labels:
+        - chore
+        - Refactoring
+        - Configuration
+        - 'Configuration changes'
+  - title: '⬆️ Dependencies'
+    when:
+      labels:
+        - dependencies
+  - type: version-resolver
+    semver-increment: major
+    when:
+      labels:
+        - breaking
+  - type: version-resolver
+    semver-increment: minor
+    when:
+      labels:
+        - feature
+        - enhancement
+  - type: version-resolver
+    semver-increment: patch
+    when:
+      labels:
+        - bug
+        - 'Bug fix'
+        - 'Bug fix with tests'
+        - documentation
+        - 'Includes Documentation'
+        - chore
+        - Refactoring
+        - Configuration
+        - 'Configuration changes'
+        - performance
+        - dependencies
+  - type: version-resolver
+    semver-increment: patch
+
+change-template: '- $TITLE by @$AUTHOR in #$NUMBER'
+change-title-escapes: '\<*_&'
+
+autolabeler:
+  - label: feature
+    title:
+      - '/^feat(\(.+\))?!?:/i'
+  - label: bug
+    title:
+      - '/^fix(\(.+\))?!?:/i'
+  - label: documentation
+    title:
+      - '/^docs(\(.+\))?!?:/i'
+  - label: performance
+    title:
+      - '/^perf(\(.+\))?!?:/i'
+  - label: Refactoring
+    title:
+      - '/^refactor(\(.+\))?!?:/i'
+  - label: chore
+    title:
+      - '/^chore(\(.+\))?!?:/i'
+  - label: dependencies
+    title:
+      - '/^build\(deps/i'
+      - '/^deps(\(.+\))?!?:/i'
+  - label: breaking
+    title:
+      - '/^[a-z]+(\(.+\))?!:/i'

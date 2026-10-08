@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import MagicMock, patch
 
 from pr_agent.config_loader import apply_secrets_manager_config, apply_secrets_to_config
@@ -47,7 +46,7 @@ class TestConfigLoaderSecrets:
 
             # Confirm execution is skipped for non-AWS Secrets Manager
             apply_secrets_manager_config()
-            
+
             # Confirm get_all_secrets is not called
             assert not hasattr(mock_provider, 'get_all_secrets') or \
                    not mock_provider.get_all_secrets.called
@@ -117,4 +116,4 @@ class TestConfigLoaderSecrets:
             mock_get_provider.side_effect = Exception("Provider error")
 
             # Confirm processing continues even when exception occurs
-            apply_secrets_manager_config()  # Confirm no exception is raised 
+            apply_secrets_manager_config()  # Confirm no exception is raised

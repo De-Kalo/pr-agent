@@ -6,10 +6,14 @@ from datetime import datetime
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import get_git_provider
 from pr_agent.log import get_logger, setup_logger
-from tests.e2e_tests.e2e_utils import (FILE_PATH,
-                                       IMPROVE_START_WITH_REGEX_PATTERN,
-                                       NEW_FILE_CONTENT, NUM_MINUTES,
-                                       PR_HEADER_START_WITH, REVIEW_START_WITH)
+from tests.e2e_tests.e2e_utils import (
+    FILE_PATH,
+    IMPROVE_START_WITH_REGEX_PATTERN,
+    NEW_FILE_CONTENT,
+    NUM_MINUTES,
+    PR_HEADER_START_WITH,
+    REVIEW_START_WITH,
+)
 
 log_level = os.environ.get("LOG_LEVEL", "INFO")
 setup_logger(log_level)
@@ -63,7 +67,7 @@ def test_e2e_run_github_app():
 
         # check every 1 minute, for 5, minutes if the PR has all the tool results
         for i in range(NUM_MINUTES):
-            logger.info(f"Waiting for the PR to get all the tool results...")
+            logger.info("Waiting for the PR to get all the tool results...")
             time.sleep(60)
             logger.info(f"Checking the PR {pr.html_url} after {i + 1} minute(s)")
             pr.update()
@@ -78,7 +82,7 @@ def test_e2e_run_github_app():
             else:
                 logger.info(f"Waiting for the PR to get all the tool results. {i + 1} minute(s) passed")
         else:
-            assert False, f"After {NUM_MINUTES} minutes, the PR did not get all the tool results"
+            raise AssertionError(f"After {NUM_MINUTES} minutes, the PR did not get all the tool results")
 
         # cleanup - delete the branch
         logger.info(f"Deleting the branch {new_branch}")
@@ -91,7 +95,7 @@ def test_e2e_run_github_app():
         # delete the branch
         logger.info(f"Deleting the branch {new_branch}")
         repo.get_git_ref(f"heads/{new_branch}").delete()
-        assert False
+        raise AssertionError()
 
 
 if __name__ == '__main__':

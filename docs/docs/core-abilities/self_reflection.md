@@ -1,6 +1,11 @@
-`Supported Git Platforms: GitHub, GitLab, Bitbucket`
+---
+title: "Self-Reflection"
+sidebar_position: 7
+---
 
-Qodo Merge implements a **self-reflection** process where the AI model reflects, scores, and re-ranks its own suggestions, eliminating irrelevant or incorrect ones.
+`Supported Git Platforms: GitHub, GitLab, Bitbucket, Azure DevOps, Gitea`
+
+PR-Agent implements a **self-reflection** process where the AI model reflects, scores, and re-ranks its own suggestions, eliminating irrelevant or incorrect ones.
 This approach improves the quality and relevance of suggestions, saving users time and enhancing their experience.
 Configuration options allow users to set a score threshold for further filtering out suggestions.
 
@@ -8,14 +13,15 @@ Configuration options allow users to set a score threshold for further filtering
 
 Given that not all generated code suggestions will be relevant, it is crucial to enable users to review them in a fast and efficient way, allowing quick identification and filtering of non-applicable ones.
 
-To achieve this goal, Qodo Merge offers a dedicated hierarchical structure when presenting suggestions to users:
+To achieve this goal, PR-Agent offers a dedicated hierarchical structure when presenting suggestions to users:
 
 - A "category" section groups suggestions by their category, allowing users to quickly dismiss irrelevant suggestions.
 - Each suggestion is first described by a one-line summary, which can be expanded to a full description by clicking on a collapsible.
 - Upon expanding a suggestion, the user receives a more comprehensive description, and a code snippet demonstrating the recommendation.
 
-!!! note "Fast Review"
-    This hierarchical structure is designed to facilitate rapid review of each suggestion, with users spending an average of ~5-10 seconds per item.
+:::note[Fast Review]
+This hierarchical structure is designed to facilitate rapid review of each suggestion, with users spending an average of ~5-10 seconds per item.
+:::
 
 ## Self-reflection and Re-ranking
 
@@ -33,13 +39,13 @@ This process consists of the following steps:
 
 Note that presenting all generated suggestions simultaneously provides the model with a comprehensive context, enabling it to make more informed decisions compared to evaluating each suggestion individually.
 
-To conclude, the self-reflection process enables Qodo Merge to prioritize suggestions based on their importance, eliminate inaccurate or irrelevant proposals, and optionally exclude suggestions that fall below a specified threshold of significance.
+To conclude, the self-reflection process enables PR-Agent to prioritize suggestions based on their importance, eliminate inaccurate or irrelevant proposals, and optionally exclude suggestions that fall below a specified threshold of significance.
 This results in a more refined and valuable set of suggestions for the user, saving time and improving the overall experience.
 
 ## Example Results
 
-![self_reflection](https://codium.ai/images/pr_agent/self_reflection1.png){width=768}
-![self_reflection](https://codium.ai/images/pr_agent/self_reflection2.png){width=768}
+<img src="/img/self_reflection1.png" alt="self_reflection" width="768" />
+<img src="/img/self_reflection2.png" alt="self_reflection" width="768" />
 
 ## Appendix - Relevant Configuration Options
 

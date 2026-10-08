@@ -11,20 +11,20 @@ jobs:
     name: PR-Agent E2E GitHub App Test
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - id: build
         name: Build dev docker
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           file: ./docker/Dockerfile
           push: false
           load: true
-          tags: codiumai/pr-agent:test
+          tags: pragent/pr-agent:test
           cache-from: type=gha,scope=dev
           cache-to: type=gha,mode=max,scope=dev
           target: test
@@ -32,14 +32,14 @@ jobs:
       - id: test1
         name: E2E test github app
         run: |
-          docker run -e GITHUB.USER_TOKEN=${{ secrets.TOKEN_GITHUB }} --rm codiumai/pr-agent:test pytest -v tests/e2e_tests/test_github_app.py
+          docker run -e GITHUB.USER_TOKEN=${{ secrets.TOKEN_GITHUB }} --rm pragent/pr-agent:test pytest -v tests/e2e_tests/test_github_app.py
 
       - id: test2
         name: E2E gitlab webhook
         run: |
-          docker run -e gitlab.PERSONAL_ACCESS_TOKEN=${{ secrets.TOKEN_GITLAB }} --rm codiumai/pr-agent:test pytest -v tests/e2e_tests/test_gitlab_webhook.py
+          docker run -e gitlab.PERSONAL_ACCESS_TOKEN=${{ secrets.TOKEN_GITLAB }} --rm pragent/pr-agent:test pytest -v tests/e2e_tests/test_gitlab_webhook.py
 
       - id: test3
         name: E2E bitbucket app
         run: |
-          docker run -e BITBUCKET.USERNAME=${{ secrets.BITBUCKET_USERNAME }}  -e BITBUCKET.PASSWORD=${{ secrets.BITBUCKET_PASSWORD }} --rm codiumai/pr-agent:test pytest -v tests/e2e_tests/test_bitbucket_app.py
+          docker run -e BITBUCKET.USERNAME=${{ secrets.BITBUCKET_USERNAME }}  -e BITBUCKET.PASSWORD=${{ secrets.BITBUCKET_PASSWORD }} --rm pragent/pr-agent:test pytest -v tests/e2e_tests/test_bitbucket_app.py

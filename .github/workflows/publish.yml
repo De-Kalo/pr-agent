@@ -1,0 +1,323 @@
+name: Publish
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.35.0). Will overwrite pyproject.toml on main.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Normalize the concurrency key so a release event (tag `v0.35.0`) and a
+# workflow_dispatch (input `0.35.0`) for the same version can never overlap.
+concurrency:
+  group: publish-${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', inputs.version) }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      # workflow_dispatch can be triggered from any branch in the UI, but the
+      # finalize job pushes the version bump to main and creates the tag. If
+      # we let it run from a non-main ref we'd publish artifacts from a commit
+      # that isn't on main and tag main with mismatched code.
+      - name: Reject workflow_dispatch from non-main ref
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::workflow_dispatch must be triggered from the main branch (got $GITHUB_REF)."
+          exit 1
+
+      - name: Resolve version
+        id: resolve
+        env:
+          RELEASE_INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAG="${GITHUB_REF_NAME}"
+          else
+            VERSION="$RELEASE_INPUT_VERSION"
+            TAG="v${VERSION}"
+          fi
+          if [[ "$VERSION" == *$'\n'* || "$VERSION" == *$'\r'* ]]; then
+            echo "::error::Version must be a valid SemVer 2.0.0 value (for example, 0.35.0 or 0.35.0-rc.1)."
+            exit 1
+          fi
+          # Strict SemVer 2.0.0 regex adapted for Bash's POSIX ERE operator.
+          # See https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+          if ! [[ "$VERSION" =~ $SEMVER ]]; then
+            echo "::error::Version must be a valid SemVer 2.0.0 value (for example, 0.35.0 or 0.35.0-rc.1)."
+            printf 'Rejected version: %q\n' "$VERSION"
+            exit 1
+          fi
+          if [[ "$VERSION" == *+* ]]; then
+            echo "::error::SemVer build metadata is not supported for releases."
+            exit 1
+          fi
+          # Keep version-suffix tags within Docker's 128-character limit:
+          # 128 - 1 separator - 24 ("bitbucket_server_webhook") = 103.
+          if (( ${#VERSION} > 103 )); then
+            echo "::error::Version is too long for release image tags (maximum 103 characters)."
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+  publish-pypi:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Set version in pyproject.toml
+        run: python scripts/set_pyproject_version.py "${{ needs.prepare.outputs.version }}"
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          # Re-running the workflow for the same version (e.g. after a
+          # transient registry failure) should not fail because the wheel
+          # already exists on PyPI.
+          skip-existing: true
+
+  publish-docker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: docker/Dockerfile
+            target: cli
+            suffix: ''
+            rolling: latest
+          - dockerfile: docker/Dockerfile
+            target: github_app
+            suffix: github_app
+            rolling: ''
+          - dockerfile: docker/Dockerfile
+            target: bitbucket_app
+            suffix: bitbucket_app
+            rolling: ''
+          - dockerfile: docker/Dockerfile
+            target: bitbucket_server_webhook
+            suffix: bitbucket_server_webhook
+            rolling: bitbucket_server_webhook
+          - dockerfile: docker/Dockerfile
+            target: github_polling
+            suffix: github_polling
+            rolling: ''
+          - dockerfile: docker/Dockerfile
+            target: gitlab_webhook
+            suffix: gitlab_webhook
+            rolling: gitlab_webhook
+          - dockerfile: docker/Dockerfile
+            target: azure_devops_webhook
+            suffix: azure_devops_webhook
+            rolling: ''
+          - dockerfile: docker/Dockerfile
+            target: gitea_app
+            suffix: gitea_app
+            rolling: gitea_app
+          - dockerfile: docker/Dockerfile
+            target: mosaico_agent
+            suffix: mosaico_agent
+            rolling: mosaico_agent
+          - dockerfile: docker/Dockerfile
+            target: github_action
+            suffix: github_action
+            rolling: github_action
+          - dockerfile: docker/Dockerfile.lambda
+            target: github_lambda
+            suffix: github_lambda
+            rolling: github_lambda
+          - dockerfile: docker/Dockerfile.lambda
+            target: gitlab_lambda
+            suffix: gitlab_lambda
+            rolling: gitlab_lambda
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Set version in pyproject.toml
+        run: python scripts/set_pyproject_version.py "${{ needs.prepare.outputs.version }}"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+        with:
+          # amd64 is the runner's native arch; only arm64 needs emulation.
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          V="${{ needs.prepare.outputs.version }}"
+          SUFFIX="${{ matrix.suffix }}"
+          ROLLING="${{ matrix.rolling }}"
+          if [ -z "$SUFFIX" ]; then
+            TAGS="pragent/pr-agent:${V}"
+          else
+            TAGS="pragent/pr-agent:${V}-${SUFFIX}"
+          fi
+          if [ -n "$ROLLING" ]; then
+            TAGS="${TAGS},pragent/pr-agent:${ROLLING}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.suffix || 'cli' }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.suffix || 'cli' }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: index.docker.io/pragent/pr-agent
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  finalize:
+    needs: [prepare, publish-pypi, publish-docker]
+    # Not gated on publish-pypi: the bump and the dispatch-path tag are about
+    # this repo's state, not the index. Coupling them meant one PyPI failure
+    # left main on the old version with all images already published (v0.40.0).
+    if: >-
+      always()
+      && needs.prepare.result == 'success'
+      && needs.publish-docker.result == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      # Check out the exact commit publish-pypi/publish-docker built from, so
+      # the bump commit's parent equals what was actually published. We push
+      # to main fast-forward only — if main has moved during the run, we skip
+      # the push rather than rebasing onto a newer commit that wasn't built.
+      # This preserves the invariant that `git checkout vX.Y.Z` resolves to a
+      # commit whose tree was published.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      - name: Flag missing PyPI publish
+        if: needs.publish-pypi.result != 'success'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          echo "::warning::publish-pypi ${{ needs.publish-pypi.result }}; $VERSION is not on PyPI. Images and the version bump went through - re-run publish-pypi once the cause is fixed."
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump pyproject.toml and sync uv.lock
+        run: |
+          python scripts/set_pyproject_version.py "${{ needs.prepare.outputs.version }}"
+          uv lock
+
+      - name: Commit & push bump (fast-forward only)
+        id: commit
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PUBLISHED_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          if git diff --quiet pyproject.toml uv.lock; then
+            echo "pyproject.toml and uv.lock already at $VERSION on $PUBLISHED_SHA; nothing to commit."
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "sha=$PUBLISHED_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git add pyproject.toml uv.lock
+          git commit -m "chore(release): bump version to $VERSION [skip ci]"
+          if git push origin "HEAD:refs/heads/main"; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::main has moved past the published commit ($PUBLISHED_SHA); skipping the bump push rather than rebasing onto a commit that was not built. Bump pyproject.toml and uv.lock on main manually:  git checkout main && python scripts/set_pyproject_version.py $VERSION && uv lock && git commit -am 'chore(release): bump version to $VERSION' && git push"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "sha=$PUBLISHED_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and GitHub Release (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; not recreating."
+          else
+            gh release create "$TAG" --target "$SHA" --title "$TAG" --generate-notes
+          fi
+
+      # The tag is created when the release is published and immutable releases
+      # make it unmovable, so the bump lands on main only. Wheels and images are
+      # built after set_pyproject_version, so it's just the tagged tree that lags.
+      - name: Note tag/bump commit split (release event only)
+        if: github.event_name == 'release' && steps.commit.outputs.bumped == 'true'
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          echo "::notice::$TAG points at the published commit; the bump to $VERSION is $SHA on main. A source checkout of $TAG shows the previous version."

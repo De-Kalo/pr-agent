@@ -1,18 +1,25 @@
-# Fetching Ticket Context for PRs
+---
+title: "Fetching Ticket Context for PRs"
+sidebar_position: 5
+---
 
-`Supported Git Platforms: GitHub, GitLab, Bitbucket`
+`Supported Git Platforms: GitHub, GitLab, Bitbucket, Azure DevOps, Gitea`
+
+:::note[Branch-name linking: Jira keys on all providers; numeric GitHub issues on GitHub only]
+**Jira** ticket keys (e.g. `ABC-123`) are extracted from the branch name on **every git provider**.
+Extracting **numeric GitHub issue** links from the branch name (and the optional `branch_issue_regex` setting) is currently implemented for **GitHub only**; support for other providers is planned for a later release.
+:::
 
 ## Overview
 
-Qodo Merge streamlines code review workflows by seamlessly connecting with multiple ticket management systems.
+PR-Agent streamlines code review workflows by seamlessly connecting with multiple ticket management systems.
 This integration enriches the review process by automatically surfacing relevant ticket information and context alongside code changes.
 
 **Ticket systems supported**:
 
-- [GitHub/Gitlab Issues](https://qodo-merge-docs.qodo.ai/core-abilities/fetching_ticket_context/#githubgitlab-issues-integration)
-- [Jira (💎)](https://qodo-merge-docs.qodo.ai/core-abilities/fetching_ticket_context/#jira-integration)
-- [Linear (💎)](https://qodo-merge-docs.qodo.ai/core-abilities/fetching_ticket_context/#linear-integration)
-- [Monday (💎)](https://qodo-merge-docs.qodo.ai/core-abilities/fetching_ticket_context/#monday-integration)
+- [GitHub/GitLab Issues](#githubgitlab-issues-integration)
+- [Jira](#jira-integration)
+- [Asana](#asana-integration)
 
 **Ticket data fetched:**
 
@@ -28,11 +35,12 @@ This integration enriches the review process by automatically surfacing relevant
 Ticket Recognition Requirements:
 
 - The PR description should contain a link to the ticket or if the branch name starts with the ticket id / number.
-- For Jira tickets, you should follow the instructions in [Jira Integration](https://qodo-merge-docs.qodo.ai/core-abilities/fetching_ticket_context/#jira-integration) in order to authenticate with Jira.
+- For Jira tickets, you should follow the instructions in [Jira Integration](#jira-integration) in order to authenticate with Jira.
+- For Asana tickets, see [Asana Integration](#asana-integration).
 
 ### Describe tool
 
-Qodo Merge will recognize the ticket and use the ticket content (title, description, labels) to provide additional context for the code changes.
+PR-Agent will recognize the ticket and use the ticket content (title, description, labels) to provide additional context for the code changes.
 By understanding the reasoning and intent behind modifications, the LLM can offer more insightful and relevant code analysis.
 
 ### Review tool
@@ -47,24 +55,24 @@ Each ticket will be assigned a label (Compliance/Alignment level), Indicates the
 - Not Compliant
 - PR Code Verified
 
-![Ticket Compliance](https://www.qodo.ai/images/pr_agent/ticket_compliance_review.png){width=768}
+<img src="/img/ticket_compliance_review.png" alt="Ticket Compliance" width="768" />
 
 A `PR Code Verified` label indicates the PR code meets ticket requirements, but requires additional manual testing beyond the code scope. For example - validating UI display across different environments (Mac, Windows, mobile, etc.).
 
 
 #### Configuration options
 
-- 
+-
 
-    By default, the tool will automatically validate if the PR complies with the referenced ticket.
+    By default, the `review` tool will automatically validate if the PR complies with the referenced ticket.
     If you want to disable this feedback, add the following line to your configuration file:
-    
+
     ```toml
     [pr_reviewer]
     require_ticket_analysis_review=false
     ```
 
-- 
+-
 
     If you set:
     ```toml
@@ -72,13 +80,13 @@ A `PR Code Verified` label indicates the PR code meets ticket requirements, but 
     check_pr_additional_content=true
     ```
     (default: `false`)
-    
+
     the `review` tool will also validate that the PR code doesn't contain any additional content that is not related to the ticket. If it does, the PR will be labeled at best as `PR Code Verified`, and the `review` tool will provide a comment with the additional unrelated content found in the PR code.
 
-## GitHub/Gitlab Issues Integration
+## GitHub/GitLab Issues Integration
 
-Qodo Merge will automatically recognize GitHub/Gitlab issues mentioned in the PR description and fetch the issue content.
-Examples of valid GitHub/Gitlab issue references:
+PR-Agent will automatically recognize GitHub/GitLab issues mentioned in the PR description and fetch the issue content.
+Examples of valid GitHub/GitLab issue references:
 
 - `https://github.com/<ORG_NAME>/<REPO_NAME>/issues/<ISSUE_NUMBER>` or `https://gitlab.com/<ORG_NAME>/<REPO_NAME>/-/issues/<ISSUE_NUMBER>`
 - `#<ISSUE_NUMBER>`
@@ -87,35 +95,72 @@ Examples of valid GitHub/Gitlab issue references:
 Branch names can also be used to link issues, for example:
 - `123-fix-bug` (where `123` is the issue number)
 
-Since Qodo Merge is integrated with GitHub, it doesn't require any additional configuration to fetch GitHub issues.
+This branch-name detection applies **only when the git provider is GitHub**. Support for other platforms is planned for later.
 
-## Jira Integration 💎
+Since PR-Agent is integrated with GitHub, it doesn't require any additional configuration to fetch GitHub issues.
 
-We support both Jira Cloud and Jira Server/Data Center.
+## Asana Integration
+
+PR-Agent can detect Asana task references in PR descriptions, fetch the referenced tasks through the
+[Asana API](https://developers.asana.com/reference/gettask), and include their titles, descriptions, and tags in the
+ticket compliance check.
+
+**Supported reference formats:**
+
+- Legacy links: `https://app.asana.com/0/{project_gid}/{task_gid}`
+- Current permalinks: `https://app.asana.com/1/{workspace_gid}/task/{task_gid}`
+- Current project links: `https://app.asana.com/1/{workspace_gid}/project/{project_gid}/task/{task_gid}`
+- Current Home links: `https://app.asana.com/1/{workspace_gid}/home/task/{task_gid}`
+- Task comment links ending in `/comment/{comment_gid}` (the parent task is fetched)
+
+**How to link a PR to an Asana task:**
+
+Include an Asana task URL in your PR description. PR-Agent will detect it automatically and include it in the related
+tickets list.
+
+### Authentication
+
+Create an [Asana personal access token](https://developers.asana.com/docs/personal-access-token) with access to the
+tasks that PR-Agent should read. Configure it in `.secrets.toml`:
+
+```toml
+[asana]
+api_token = "YOUR_PERSONAL_ACCESS_TOKEN"
+```
+
+For environment-based deployments, set the equivalent Dynaconf environment variable:
+
+```bash
+ASANA__API_TOKEN="YOUR_PERSONAL_ACCESS_TOKEN"
+```
+
+The token is sent only to Asana's fixed task API endpoint as a Bearer token. When no token is configured or a task is
+not accessible to that token, PR-Agent skips that Asana task instead of evaluating compliance against placeholder
+content. API request timeout can be adjusted with `asana.request_timeout` (10 seconds by default, capped at 60 seconds).
+
+### Ticket limits
+
+PR-Agent fetches the first three detected Asana tasks at most, preserving their description order. This is an
+additive, provider-specific limit, with native tickets listed before Asana tasks:
+
+- On GitHub, the existing limit of three GitHub issues is preserved, plus up to three Asana tasks.
+- On Azure DevOps, all linked work items are preserved, plus up to three Asana tasks.
+- On other providers, up to three detected Asana tasks can supply ticket context.
+
+Keeping these limits separate prevents Asana references from silently displacing native tickets and avoids changing
+the established ticket-extraction behavior of existing providers.
+
+## Jira Integration
+
+Only **Jira Cloud** is supported. The base URL is derived from a validated site name
+(`jira_site` → `https://<site>.atlassian.net`) rather than taken as a free-form URL, so
+the configured destination is always an Atlassian Cloud host. Jira Server / Data Center
+(self-hosted) uses a free-form host and is not supported yet; it can be added once
+base-URL handling for the self-hosted case is settled.
 
 ### Jira Cloud
 
-There are two ways to authenticate with Jira Cloud:
-
-**1) Jira App Authentication**
-
-The recommended way to authenticate with Jira Cloud is to install the Qodo Merge app in your Jira Cloud instance. This will allow Qodo Merge to access Jira data on your behalf.
-
-Installation steps:
-
-1. Go to the [Qodo Merge integrations page](https://app.qodo.ai/qodo-merge/integrations)
-
-2. Click on the Connect **Jira Cloud** button to connect the Jira Cloud app
-
-3. Click the `accept` button.<br>
-![Jira Cloud App Installation](https://www.qodo.ai/images/pr_agent/jira_app_installation2.png){width=384}
-
-4. After installing the app, you will be redirected to the Qodo Merge registration page. and you will see a success message.<br>
-![Jira Cloud App success message](https://www.qodo.ai/images/pr_agent/jira_app_success.png){width=384}
-
-5. Now Qodo Merge will be able to fetch Jira ticket context for your PRs.
-
-**2) Email/Token Authentication**
+#### Email/Token Authentication
 
 You can create an API token from your Atlassian account:
 
@@ -127,268 +172,54 @@ You can create an API token from your Atlassian account:
 
 4. Click Copy to clipboard.
 
-![Jira Cloud API Token](https://images.ctfassets.net/zsv3d0ugroxu/1RYvh9lqgeZjjNe5S3Hbfb/155e846a1cb38f30bf17512b6dfd2229/screenshot_NewAPIToken){width=384}
+<img src="https://images.ctfassets.net/zsv3d0ugroxu/1RYvh9lqgeZjjNe5S3Hbfb/155e846a1cb38f30bf17512b6dfd2229/screenshot_NewAPIToken" alt="Jira Cloud API Token" width="384" />
 
-5. In your [configuration file](https://qodo-merge-docs.qodo.ai/usage-guide/configuration_options/) add the following lines:
+5. In your [configuration file](../usage-guide/configuration_options.md) add the following lines:
 
 ```toml
 [jira]
-jira_api_token = "YOUR_API_TOKEN"
+jira_site = "<JIRA_SITE>"   # the "<site>" in https://<site>.atlassian.net (e.g. "mycompany")
 jira_api_email = "YOUR_EMAIL"
-```
-
-### Jira Data Center/Server
-
-[//]: # ()
-[//]: # (##### Local App Authentication &#40;For Qodo Merge On-Premise Customers&#41;)
-
-[//]: # ()
-[//]: # (##### 1. Step 1: Set up an application link in Jira Data Center/Server)
-
-[//]: # (* Go to Jira Administration > Applications > Application Links > Click on `Create link`)
-
-[//]: # ()
-[//]: # (![application links]&#40;https://www.qodo.ai/images/pr_agent/jira_app_links.png&#41;{width=384})
-
-[//]: # (* Choose `External application` and set the direction to `Incoming` and then click `Continue`)
-
-[//]: # ()
-[//]: # (![external application]&#40;https://www.qodo.ai/images/pr_agent/jira_create_link.png&#41;{width=256})
-
-[//]: # (* In the following screen, enter the following details:)
-
-[//]: # (    * Name: `Qodo Merge`)
-
-[//]: # (    * Redirect URL: Enter your Qodo Merge URL followed  `https://{QODO_MERGE_ENDPOINT}/register_ticket_provider`)
-
-[//]: # (    * Permission: Select `Read`)
-
-[//]: # (    * Click `Save`)
-
-[//]: # ()
-[//]: # (![external application details]&#40;https://www.qodo.ai/images/pr_agent/jira_fill_app_link.png&#41;{width=384})
-
-[//]: # (* Copy the `Client ID` and `Client secret` and set them in your `.secrets` file:)
-
-[//]: # ()
-[//]: # (![client id and secret]&#40;https://www.qodo.ai/images/pr_agent/jira_app_credentionals.png&#41;{width=256})
-
-[//]: # (```toml)
-
-[//]: # ([jira])
-
-[//]: # (jira_app_secret = "...")
-
-[//]: # (jira_client_id = "...")
-
-[//]: # (```)
-
-[//]: # ()
-[//]: # (##### 2. Step 2: Authenticate with Jira Data Center/Server)
-
-[//]: # (* Open this URL in your browser: `https://{QODO_MERGE_ENDPOINT}/jira_auth`)
-
-[//]: # (* Click on link)
-
-[//]: # ()
-[//]: # (![jira auth success]&#40;https://www.qodo.ai/images/pr_agent/jira_auth_page.png&#41;{width=384})
-
-[//]: # ()
-[//]: # (* You will be redirected to Jira Data Center/Server, click `Allow`)
-
-[//]: # (* You will be redirected back to Qodo Merge and you will see a success message.)
-
-[//]: # (Personal Access Token &#40;PAT&#41; Authentication)
-
-#### Using Basic Authentication for Jira Data Center/Server
-
-You can use your Jira username and password to authenticate with Jira Data Center/Server.
-
-In your Configuration file/Environment variables/Secrets file, add the following lines:
-
-```toml
-jira_api_email = "your_username"
-jira_api_token = "your_password"
-```
-
-(Note that indeed the 'jira_api_email' field is used for the username, and the 'jira_api_token' field is used for the user password.)
-
-##### Validating Basic authentication via Python script
-
-If you are facing issues retrieving tickets in Qodo Merge with Basic auth, you can validate the flow using a Python script.
-This following steps will help you check if the basic auth is working correctly, and if you can access the Jira ticket details:
-
-1. run `pip install jira==3.8.0`
-
-2. run the following Python script (after replacing the placeholders with your actual values):
-
-???- example "Script to validate basic auth"
-
-    ```python
-    from jira import JIRA
-    
-    
-    if __name__ == "__main__":
-        try:
-            # Jira server URL
-            server = "https://..."
-            # Basic auth
-            username = "..."
-            password = "..."
-            # Jira ticket code (e.g. "PROJ-123")
-            ticket_id = "..."
-    
-            print("Initializing JiraServerTicketProvider with JIRA server")
-            # Initialize JIRA client
-            jira = JIRA(
-                server=server,
-                basic_auth=(username, password),
-                timeout=30
-            )
-            if jira:
-                print(f"JIRA client initialized successfully")
-            else:
-                print("Error initializing JIRA client")
-    
-            # Fetch ticket details
-            ticket = jira.issue(ticket_id)
-            print(f"Ticket title: {ticket.fields.summary}")
-    
-        except Exception as e:
-            print(f"Error fetching JIRA ticket details: {e}")
-    ```
-
-#### Using a Personal Access Token (PAT) for Jira Data Center/Server
-
-1. Create a [Personal Access Token (PAT)](https://confluence.atlassian.com/enterprise/using-personal-access-tokens-1026032365.html) in your Jira account
-2. In your Configuration file/Environment variables/Secrets file, add the following lines:
-
-```toml
-[jira]
-jira_base_url = "YOUR_JIRA_BASE_URL" # e.g. https://jira.example.com
 jira_api_token = "YOUR_API_TOKEN"
 ```
 
-##### Validating PAT token via Python script
+`jira_site` is your Jira Cloud site name — the part before `.atlassian.net` (for
+`https://mycompany.atlassian.net`, the site is `mycompany`). PR-Agent builds the base URL
+as `https://<jira_site>.atlassian.net`; it does not accept a full URL, so configuration
+cannot redirect the authenticated request to another host. Store `jira_api_email` and
+`jira_api_token` as secrets (environment variables or the secrets file), not in
+repository-committed configuration.
 
-If you are facing issues retrieving tickets in Qodo Merge with PAT token, you can validate the flow using a Python script.
-This following steps will help you check if the token is working correctly, and if you can access the Jira ticket details:
+#### Acceptance criteria / requirements (optional)
 
-1. run `pip install jira==3.8.0`
+To include a ticket's acceptance criteria in the analysis, set `jira_requirements_field`
+to the id of the custom field that holds it. The field id is specific to your Jira
+instance (for example `customfield_10127`); leave it empty to skip requirements.
 
-2. run the following Python script (after replacing the placeholders with your actual values):
+```toml
+[jira]
+jira_requirements_field = "customfield_10127"
+```
 
-??? example- "Script to validate PAT token"
+#### Project key allowlist (optional)
 
-    ```python
-    from jira import JIRA
-    
-    
-    if __name__ == "__main__":
-        try:
-            # Jira server URL
-            server = "https://..."
-            # Jira PAT token
-            token_auth = "..."
-            # Jira ticket code (e.g. "PROJ-123")
-            ticket_id = "..."
-    
-            print("Initializing JiraServerTicketProvider with JIRA server")
-            # Initialize JIRA client
-            jira = JIRA(
-                server=server,
-                token_auth=token_auth,
-                timeout=30
-            )
-            if jira:
-                print(f"JIRA client initialized successfully")
-            else:
-                print("Error initializing JIRA client")
-    
-            # Fetch ticket details
-            ticket = jira.issue(ticket_id)
-            print(f"Ticket title: {ticket.fields.summary}")
-    
-        except Exception as e:
-            print(f"Error fetching JIRA ticket details: {e}")
-    ```
+Ticket detection matches any `PROJECT-123` shaped text, so strings like `SHA-256`,
+`UTF-8` or `ISO-8601` in a title or description each cost an authenticated lookup that
+returns 404. If your repository works with a known set of Jira projects, list their keys
+in `project_keys`; keys with any other prefix are then dropped before any lookup (they are
+named once at debug level in the log). Leave the list empty to look up every key found.
 
+```toml
+[jira]
+project_keys = ["PROJ", "OPS"]
+```
 
-### Multi-JIRA Server Configuration 💎
-
-Qodo Merge supports connecting to multiple JIRA servers using different authentication methods.
-
-=== "Email/Token (Basic Auth)"
-
-    Configure multiple servers using Email/Token authentication:
-
-    - `jira_servers`: List of JIRA server URLs
-    - `jira_api_token`: List of API tokens (for Cloud) or passwords (for Data Center)
-    - `jira_api_email`: List of emails (for Cloud) or usernames (for Data Center)
-    - `jira_base_url`: Default server for ticket IDs like `PROJ-123`, Each repository can configure (local config file) its own `jira_base_url` to choose which server to use by default.
-
-    **Example Configuration:**
-    ```toml
-    [jira]
-    # Server URLs
-    jira_servers = ["https://company.atlassian.net", "https://datacenter.jira.com"]
-
-    # API tokens/passwords
-    jira_api_token = ["cloud_api_token_here", "datacenter_password"]
-
-    # Emails/usernames (both required)
-    jira_api_email = ["user@company.com", "datacenter_username"]
-
-    # Default server for ticket IDs
-    jira_base_url = "https://company.atlassian.net"
-    ```
-
-=== "PAT Auth"
-
-    Configure multiple servers using Personal Access Token authentication:
-
-    - `jira_servers`: List of JIRA server URLs
-    - `jira_api_token`: List of PAT tokens
-    - `jira_api_email`: Not needed (can be omitted or left empty)
-    - `jira_base_url`: Default server for ticket IDs like `PROJ-123`, Each repository can configure (local config file) its own `jira_base_url` to choose which server to use by default.
-
-    **Example Configuration:**
-    ```toml
-    [jira]
-    # Server URLs
-    jira_servers = ["https://server1.jira.com", "https://server2.jira.com"]
-
-    # PAT tokens only
-    jira_api_token = ["pat_token_1", "pat_token_2"]
-
-    # Default server for ticket IDs
-    jira_base_url = "https://server1.jira.com"
-    ```
-
-    **Mixed Authentication (Email/Token + PAT):**
-    ```toml
-    [jira]
-    jira_servers = ["https://company.atlassian.net", "https://server.jira.com"]
-    jira_api_token = ["cloud_api_token", "server_pat_token"]
-    jira_api_email = ["user@company.com", ""]  # Empty for PAT
-    ```
-
-=== "Jira Cloud App"
-
-    For Jira Cloud instances using App Authentication:
-
-    1. Install the Qodo Merge app on each JIRA Cloud instance you want to connect to
-    2. Set the default server for ticket ID resolution:
-
-    ```toml
-    [jira]
-    jira_base_url = "https://primary-team.atlassian.net"
-    ```
-
-    Full URLs (e.g., `https://other-team.atlassian.net/browse/TASK-456`) will automatically use the correct connected instance.
-
-
-
+Entries are plain upper-case project keys (letters only, as Jira writes them); anything
+else (a lower-case label, a full ticket key, a URL, a blank entry) is ignored with a
+warning. If the list is set but none of its entries is valid, no Jira lookup is made at all
+until it is fixed, so a typo cannot silently widen the lookup again. Only a missing option,
+the empty list, and an environment override set to the empty string mean "look up every
+key".
 
 ### How to link a PR to a Jira ticket
 
@@ -396,105 +227,8 @@ To integrate with Jira, you can link your PR to a ticket using either of these m
 
 **Method 1: Description Reference:**
 
-Include a ticket reference in your PR description, using either the complete URL format `https://<JIRA_ORG>.atlassian.net/browse/ISSUE-123` or the shortened ticket ID `ISSUE-123` (without prefix or suffix for the shortened ID).
+Include a ticket reference in your PR description, using either the complete URL format `https://<JIRA_SITE>.atlassian.net/browse/ISSUE-123` or the shortened ticket ID `ISSUE-123` (without prefix or suffix for the shortened ID).
 
 **Method 2: Branch Name Detection:**
 
 Name your branch with the ticket ID as a prefix (e.g., `ISSUE-123-feature-description` or `ISSUE-123/feature-description`).
-
-!!! note "Jira Base URL"
-    For shortened ticket IDs or branch detection (method 2 for JIRA cloud), you must configure the Jira base URL in your configuration file under the [jira] section:
-
-    ```toml
-    [jira]
-    jira_base_url = "https://<JIRA_ORG>.atlassian.net"
-    ```
-    Where `<JIRA_ORG>` is your Jira organization identifier (e.g., `mycompany` for `https://mycompany.atlassian.net`).
-
-## Linear Integration 💎
-
-### Linear App Authentication
-
-The recommended way to authenticate with Linear is to connect the Linear app through the Qodo Merge portal.
-
-Installation steps:
-
-1. Go to the [Qodo Merge integrations page](https://app.qodo.ai/qodo-merge/integrations)
-
-2. Navigate to the **Integrations** tab
-
-3. Click on the **Linear** button to connect the Linear app
-
-4. Follow the authentication flow to authorize Qodo Merge to access your Linear workspace
-
-5. Once connected, Qodo Merge will be able to fetch Linear ticket context for your PRs
-
-### How to link a PR to a Linear ticket
-
-Qodo Merge will automatically detect Linear tickets using either of these methods:
-
-**Method 1: Description Reference:**
-
-Include a ticket reference in your PR description using either:
-- The complete Linear ticket URL: `https://linear.app/[ORG_ID]/issue/[TICKET_ID]`
-- The shortened ticket ID: `[TICKET_ID]` (e.g., `ABC-123`) - requires linear_base_url configuration (see below).
-
-**Method 2: Branch Name Detection:**
-
-Name your branch with the ticket ID as a prefix (e.g., `ABC-123-feature-description` or `feature/ABC-123/feature-description`).
-
-!!! note "Linear Base URL"
-    For shortened ticket IDs or branch detection (method 2), you must configure the Linear base URL in your configuration file under the [linear] section:
-    
-    ```toml
-    [linear]
-    linear_base_url = "https://linear.app/[ORG_ID]"
-    ```
-    
-    Replace `[ORG_ID]` with your Linear organization identifier.
-
-## Monday Integration 💎
-
-### Monday App Authentication
-The recommended way to authenticate with Monday is to connect the Monday app through the Qodo Merge portal.
-
-Installation steps:
-
-1. Go to the [Qodo Merge integrations page](https://app.qodo.ai/qodo-merge/integrations)
-2. Navigate to the **Integrations** tab
-3. Click on the **Monday** button to connect the Monday app
-4. Follow the authentication flow to authorize Qodo Merge to access your Monday workspace
-5. Once connected, Qodo Merge will be able to fetch Monday ticket context for your PRs
-
-### Monday Ticket Context
-`Ticket Context and Ticket Compliance are supported for Monday items, but not yet available in the "PR to Ticket" feature.`
-
-When Qodo Merge processes your PRs, it extracts the following information from Monday items:
-
-* **Item ID and Name:** The unique identifier and title of the Monday item
-* **Item URL:** Direct link to the Monday item in your workspace
-* **Ticket Description:** All long text type columns and their values from the item
-* **Status and Labels:** Current status values and color-coded labels for quick context
-* **Sub-items:** Names, IDs, and descriptions of all related sub-items with hierarchical structure
-
-### How Monday Items are Detected
-Qodo Merge automatically detects Monday items from:
-
-* PR Descriptions: Full Monday URLs like https://workspace.monday.com/boards/123/pulses/456
-* Branch Names: Item IDs in branch names (6-12 digit patterns) - requires `monday_base_url` configuration
-
-### Configuration Setup (Optional)
-If you want to extract Monday item references from branch names or use standalone item IDs, you need to set the `monday_base_url` in your configuration file:
-
-To support Monday ticket referencing from branch names, item IDs (6-12 digits) should be part of the branch names and you need to configure `monday_base_url`:
-```toml
-[monday]
-monday_base_url = "https://your_monday_workspace.monday.com"
-```
-
-Examples of supported branch name patterns:
-
-* `feature/123456789` → extracts item ID 123456789
-* `bugfix/456789012-login-fix` → extracts item ID 456789012
-* `123456789` → extracts item ID 123456789
-* `456789012-login-fix` → extracts item ID 456789012
