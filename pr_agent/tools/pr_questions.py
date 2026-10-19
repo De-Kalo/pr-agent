@@ -13,6 +13,8 @@ from pr_agent.algo.pr_processing import (
     get_pr_diff,
     retry_with_fallback_models,
 )
+from pr_agent.algo.run_details import init_run_details
+from pr_agent.algo.run_output import append_run_details
 from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.token_budget import AttemptTokenBudget
 from pr_agent.algo.token_handler import TokenHandler
@@ -22,6 +24,14 @@ from pr_agent.git_providers import get_git_provider
 from pr_agent.git_providers.git_provider import get_main_pr_language
 from pr_agent.log import get_logger
 from pr_agent.servers.help import HelpMessage
+
+
+def _sanitize_slash_commands(text: str) -> str:
+    # make sure no line starts with "/", so the published comment cannot trigger quick actions
+    sanitized = text.replace("\n/", "\n /").replace("\r/", "\r /")
+    if sanitized.startswith("/"):
+        sanitized = " " + sanitized
+    return sanitized
 
 
 class PRQuestions:
@@ -65,6 +75,8 @@ class PRQuestions:
         return decode_user_text_args(args)
 
     async def run(self):
+        # A fresh collector so the run-details section reports only this command's model.
+        init_run_details()
         get_logger().info(f'Answering a PR question about the PR {self.pr_url} ')
         relevant_configs = {'pr_questions': dict(get_settings().pr_questions),
                             'config': dict(get_settings().config)}
@@ -91,7 +103,9 @@ class PRQuestions:
                 pr_comment += "\n</details>\n"
 
             if get_settings().config.publish_output:
-                self._publish_answer(pr_comment)
+                self._publish_answer(append_run_details(pr_comment, self.git_provider))
+            else:
+                get_settings().set("data.answer", (self.prediction or "").strip())
         finally:
             if temporary_comment_published:
                 try:
@@ -250,18 +264,13 @@ class PRQuestions:
 
     def _prepare_pr_answer(self) -> str:
         model_answer = self.prediction.strip()
-        # sanitize the answer so that no line will start with "/", which would
-        # trigger quick actions on providers that support them (e.g. GitLab)
-        model_answer_sanitized = model_answer.replace("\n/", "\n /")
-        model_answer_sanitized = model_answer_sanitized.replace("\r/", "\r /")
-        if model_answer_sanitized.startswith("/"):
-            model_answer_sanitized = " " + model_answer_sanitized
+        model_answer_sanitized = _sanitize_slash_commands(model_answer)
         if model_answer_sanitized != model_answer:
             get_logger().debug("Sanitized model answer",
                                artifact={"model_answer": model_answer, "sanitized_answer": model_answer_sanitized})
         answer_header = format_pr_questions_header(
             escape_markdown=self.git_provider.is_supported("markdown_backslash_escapes")
         )
-        answer_str = f"{answer_header}\n{self.question_str}\n\n"
+        answer_str = f"{answer_header}\n{_sanitize_slash_commands(self.question_str)}\n\n"
         answer_str += f"### **Answer:**\n{model_answer_sanitized}\n\n"
         return answer_str

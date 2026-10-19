@@ -29,6 +29,7 @@ def _make_settings(overrides=None):
             "custom_reasoning_model": False,
             "max_model_tokens": 32000,
             "verbosity_level": 0,
+            "model": overrides.get("config.model"),
             "seed": -1,
             "get": lambda self, key, default=None: default,
         })(),
@@ -5831,7 +5832,14 @@ async def test_raw_http_request_rejects_residual_headers_without_omit_values(mon
 async def test_raw_http_request_does_not_forward_omit_headers(model):
     kwargs = await _call(LiteLLMAIHandler(), model)
 
-    assert "headers" not in kwargs
+    if model == "openrouter/model":
+        assert kwargs["headers"] == {
+            "HTTP-Referer": "https://github.com/the-pr-agent/pr-agent",
+            "X-OpenRouter-Title": "PR-Agent",
+            "X-Title": "PR-Agent",
+        }
+    else:
+        assert "headers" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -6402,6 +6410,9 @@ async def test_azure_deployment_id_is_not_used_for_non_azure_probe(monkeypatch):
 @pytest.mark.parametrize(("setting_path", "model", "expected_key"), (
     ("ANTHROPIC.KEY", "anthropic/claude-sonnet-4-5", "anthropic-key"),
     ("COHERE.KEY", "cohere/command-r", "cohere-key"),
+    ("COMPACTIFAI.KEY", "compactifai/glm-5-3", "compactifai-key"),
+    ("COMPACTIFAI.KEY", "compactifai/glm-5-2", "compactifai-key"),
+    ("COMPACTIFAI.KEY", "compactifai/quasar-438b", "compactifai-key"),
     ("GROQ.KEY", "groq/llama-3.3-70b-versatile", "groq-key"),
     ("SAMBANOVA.KEY", "sambanova/Meta-Llama-3.3-70B-Instruct", "sambanova-key"),
     ("REPLICATE.KEY", "replicate/meta/model", "replicate-key"),
@@ -6429,6 +6440,21 @@ async def test_provider_key_is_forwarded_only_for_matching_model(monkeypatch, se
 
     assert matching_kwargs["api_key"] == expected_key
     assert openai_kwargs["api_key"] == DUMMY_LITELLM_API_KEY
+
+
+@pytest.mark.asyncio
+async def test_compactifai_configured_key_overrides_native_environment(monkeypatch):
+    monkeypatch.setenv("COMPACTIFAI_API_KEY", "native-compactifai-key")
+    monkeypatch.setattr(
+        litellm_handler,
+        "get_settings",
+        lambda: _make_settings({"COMPACTIFAI.KEY": "configured-compactifai-key"}),
+    )
+
+    kwargs = await _call(LiteLLMAIHandler(), "compactifai/glm-5-3")
+
+    assert kwargs["api_key"] == "configured-compactifai-key"
+    assert os.environ["COMPACTIFAI_API_KEY"] == "native-compactifai-key"
 
 
 @pytest.mark.asyncio
@@ -6962,9 +6988,9 @@ async def test_image_wait_preserves_native_endpoint_isolation(monkeypatch, initi
         monkeypatch.setenv("GROQ_API_BASE", initial_base)
     captured = []
 
-    def image_wait(*args, **kwargs):
+    async def image_wait(*args, **kwargs):
         monkeypatch.setenv("GROQ_API_BASE", "https://another-handler.example/v1")
-        return MagicMock(status_code=200)
+        return 200
 
     class TransportReached(BaseException):
         pass
@@ -6974,7 +7000,7 @@ async def test_image_wait_preserves_native_endpoint_isolation(monkeypatch, initi
         raise TransportReached
 
     # Run real LiteLLM dispatch/authentication; intercept only image I/O and HTTP transport.
-    monkeypatch.setattr(litellm_handler.requests, "head", image_wait)
+    monkeypatch.setattr(litellm_handler, "with_safe_redirects", image_wait)
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
     handler = LiteLLMAIHandler()
     try:
@@ -7522,11 +7548,15 @@ async def test_native_guard_header_only_equivalence(
 
 def test_json_responses_native_config_contract():
     from litellm.llms.openai_like.dynamic_config import create_responses_config_class
+    from litellm.llms.sail.responses.transformation import SailResponsesAPIConfig
     from litellm.utils import ProviderConfigManager
 
     registry = litellm_handler.JSONProviderRegistry
     providers = {name for name in registry.list_providers() if registry.supports_responses_api(name)}
-    assert providers == {"neosantara", "tensormesh", "parasail", "empiriolabs", "meta", "pinstripes"}
+    assert providers == {
+        "neosantara", "tensormesh", "parasail", "empiriolabs", "meta", "pinstripes",
+        "cortecs", "prism", "sail",
+    }
     # Pinned native HTTP client selection rejects this registry-only provider
     # before authentication; do not claim transport coverage for that path.
     assert providers - {provider.value for provider in litellm.LlmProviders} == {"empiriolabs"}
@@ -7534,7 +7564,7 @@ def test_json_responses_native_config_contract():
         # The native manager checks Python overrides before the JSON registry.
         selected = ProviderConfigManager.get_provider_responses_api_config(provider, model="test-model")
         expected = create_responses_config_class(registry.get(provider))
-        assert type(selected) is expected
+        assert type(selected) is (SailResponsesAPIConfig if provider == "sail" else expected)
         assert type(selected).validate_environment is expected.validate_environment
 
 
@@ -8237,6 +8267,7 @@ async def test_native_bedrock_model_region_precedence(monkeypatch, model_source,
         native_params = {"api_key": "owned-bearer"}
     if model_source == "model_id":
         native_params["model_id"] = arn
+        overrides["config.model"] = model
     monkeypatch.setattr(litellm_handler, "get_settings", lambda: _make_settings(overrides))
     seen = []
 

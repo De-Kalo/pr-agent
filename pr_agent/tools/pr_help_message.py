@@ -6,14 +6,16 @@ from importlib.resources.abc import Traversable
 from math import ceil, isfinite
 from pathlib import Path, PurePosixPath
 
-from jinja2 import Environment, StrictUndefined, select_autoescape
+from jinja2 import StrictUndefined, select_autoescape
+from jinja2.sandbox import SandboxedEnvironment
 from litellm import token_counter
 
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.algo.pr_processing import FallbackEligibleError, retry_with_fallback_models
-from pr_agent.algo.run_details import record_command_failure
-from pr_agent.algo.token_budget import get_max_tokens
+from pr_agent.algo.run_details import init_run_details, record_command_failure
+from pr_agent.algo.run_output import append_run_details
+from pr_agent.algo.token_budget import get_max_input_tokens, get_max_tokens
 from pr_agent.algo.token_handler import TokenEncoder
 from pr_agent.algo.utils import ModelType, load_yaml
 from pr_agent.command_descriptions import COMMAND_DESCRIPTIONS
@@ -169,7 +171,7 @@ class PRHelpMessage:
     @staticmethod
     def _render_prompts(variables):
         # These string templates produce plain-text model prompts, not HTML.
-        environment = Environment(
+        environment = SandboxedEnvironment(
             autoescape=select_autoescape(default_for_string=False),
             undefined=StrictUndefined,
         )
@@ -218,7 +220,11 @@ class PRHelpMessage:
             output_tokens = self._coerce_output_token_limit(raw_output_tokens)
         if output_tokens <= 0:
             output_tokens = HELP_OUTPUT_TOKEN_RESERVE
-        return max(get_max_tokens(model, ignore_max_model_tokens=True) - output_tokens, 0)
+        input_capacity = get_max_tokens(model, ignore_max_model_tokens=True) - output_tokens
+        max_input_tokens = get_max_input_tokens(model)
+        if max_input_tokens is not None:
+            input_capacity = min(input_capacity, max_input_tokens)
+        return max(input_capacity, 0)
 
     @staticmethod
     def _count_prompt_tokens(model: str, system_prompt: str, user_prompt: str) -> int:
@@ -425,6 +431,8 @@ class PRHelpMessage:
 
 
     async def run(self):
+        # A fresh collector so the run-details section reports only this command's model.
+        init_run_details()
         if self.question_str:
             try:
                 self.vars["snippets"], self._available_docs_files = _load_help_docs_prompt()
@@ -451,7 +459,7 @@ class PRHelpMessage:
                         answer_str = f"### Question: \n{self.question_str}\n\n"
                         answer_str += "### Answer:\n\n"
                         answer_str += response_yaml
-                        self.git_provider.publish_comment(answer_str)
+                        self.git_provider.publish_comment(append_run_details(answer_str, self.git_provider))
                     return ""
                 response_str = response_yaml.get('response')
                 relevant_sections = response_yaml.get('relevant_sections')
@@ -465,7 +473,7 @@ class PRHelpMessage:
                             "Could not find relevant information to answer the question. "
                             "Please provide more details and try again."
                         )
-                        self.git_provider.publish_comment(answer_str)
+                        self.git_provider.publish_comment(append_run_details(answer_str, self.git_provider))
                     return ""
 
                 # prepare the answer
@@ -482,14 +490,17 @@ class PRHelpMessage:
 
                 # publish the answer
                 if get_settings().config.publish_output:
-                    self.git_provider.publish_comment(answer_str)
+                    self.git_provider.publish_comment(append_run_details(answer_str, self.git_provider))
                 else:
                     get_logger().info(f"Answer:\n{answer_str}")
             else:
                 supports_gfm_markdown = self.git_provider.is_supported("gfm_markdown")
                 if not supports_gfm_markdown and not self.git_provider.supports_markdown_tables():
-                    self.git_provider.publish_comment(
-                        "The `Help` tool requires gfm markdown, which is not supported by your code platform.")
+                    notice = "The `Help` tool requires gfm markdown, which is not supported by your code platform."
+                    if get_settings().config.publish_output:
+                        self.git_provider.publish_comment(notice)
+                    else:
+                        get_logger().info(notice)
                     return
 
                 get_logger().info('Getting PR Help Message...')

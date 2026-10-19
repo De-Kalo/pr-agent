@@ -365,6 +365,17 @@ class TestAzureDevopsProviderFiles:
         assert provider._get_pr_iteration_changes() == entries
         assert provider.azure_devops_client.get_pull_request_iteration_changes.call_count == 4
 
+    def test_diff_files_propagates_iteration_collection_failure(self):
+        provider = self._provider([
+            SimpleNamespace(change_entries=[self._change("/src/first.py")], next_skip=1, next_top=1),
+            RuntimeError("later page failed"),
+        ])
+
+        with pytest.raises(RuntimeError, match="later page failed"):
+            provider.get_diff_files()
+
+        assert provider.diff_files is None
+
     def test_get_files_uses_current_iteration_and_skips_non_file_entries(self):
         provider = self._provider([
             SimpleNamespace(
@@ -412,6 +423,13 @@ class TestAzureDevopsProviderFiles:
     @staticmethod
     def _azure_item_not_found_error():
         return _item_not_found_error()
+
+    def test_diff_files_expose_filtered_lockfile_without_fetching_content(self):
+        provider = self._provider_with_change(self._change(path="/src/pnpm-lock.yaml"))
+
+        assert provider.get_diff_files() == []
+        assert provider.get_filtered_diff_file_names() == ["/src/pnpm-lock.yaml"]
+        provider.azure_devops_client.get_item.assert_not_called()
 
     @classmethod
     def _provider_with_incremental_rename(cls, *get_item_results):
@@ -1342,6 +1360,7 @@ class TestAzureDevopsProviderSuggestionAnchoring:
         provider.previous_review = "stale"
         provider.unreviewed_files_map = {"stale.cs": "stale.cs"}
         provider._pr_iteration_changes_cache = ["stale"]
+        provider._languages = {"Python": 100.0}
         provider.temp_comments = ["stale"]
         provider._parse_pr_url = MagicMock(return_value=("project", "repo", 2))
         provider._get_pr = MagicMock(return_value=MagicMock())
@@ -1354,6 +1373,7 @@ class TestAzureDevopsProviderSuggestionAnchoring:
         assert provider.previous_review is None
         assert provider.unreviewed_files_map == {}
         assert provider._pr_iteration_changes_cache is None
+        assert provider._languages is None
         assert provider.temp_comments == []
 
     def test_unmatched_suggestion_path_does_not_break_markdown(self):
@@ -1957,12 +1977,36 @@ class TestAzureDevopsProviderSuggestionDiscussions:
 
     def test_marks_thread_replies_as_agent_generated(self):
         provider = _provider_with_diff("/src/app.py")
-        provider.azure_devops_client.create_comment.return_value = SimpleNamespace()
+        response = SimpleNamespace()
+        provider.azure_devops_client.create_comment.return_value = response
+        provider._threads_cache = ["cached thread"]
 
-        provider.reply_to_thread(21, "Answer")
+        assert provider.reply_to_thread(21, "Answer") is response
 
         comment = provider.azure_devops_client.create_comment.call_args.args[0]
         assert comment.content == "Answer\n\n<!-- pr-agent-response -->"
+        assert response.thread_id == 21
+        assert provider._threads_cache is None
+        assert provider.temp_comments == []
+
+    @pytest.mark.parametrize("is_temporary", [False, True])
+    def test_thread_reply_failure_preserves_primary_and_progress_semantics(self, is_temporary):
+        provider = _provider_with_diff("/src/app.py")
+        error = RuntimeError("reply failed")
+        provider.azure_devops_client.create_comment.side_effect = error
+        cached_threads = ["cached thread"]
+        provider._threads_cache = cached_threads
+
+        if is_temporary:
+            assert provider.reply_to_comment_from_comment_id(21, "answer", is_temporary=True) is None
+        else:
+            with pytest.raises(RuntimeError) as caught:
+                provider.reply_to_comment_from_comment_id(21, "answer")
+            assert caught.value is error
+
+        provider.azure_devops_client.create_comment.assert_called_once()
+        assert provider._threads_cache is cached_threads
+        assert provider.temp_comments == []
 
     def test_excludes_temporary_progress_reply_from_conversation_history(self):
         provider = _provider_with_diff("/src/app.py")
@@ -2332,6 +2376,7 @@ class TestAzureDevopsGlobalSettings:
     @staticmethod
     def _set_org_settings(ms, org):
         ms.return_value.config.use_global_settings_file = True
+        ms.return_value.config.global_settings_repo = "pr-agent-settings"
         ms.return_value.azure_devops.get.return_value = org
 
     def test_get_owning_namespace_returns_configured_org(self):
@@ -2355,7 +2400,7 @@ class TestAzureDevopsGlobalSettings:
     def test_fetch_global_repo_settings_reads_pr_agent_settings_from_pr_project(self):
         provider = self._make_provider()
         provider.azure_devops_client.get_item_content.return_value = [b"[pr_reviewer]"]
-        result = provider._fetch_global_repo_settings("myorg")
+        result = provider._fetch_global_repo_settings("myorg", "pr-agent-settings")
 
         assert result == b"[pr_reviewer]"
         provider.azure_devops_client.get_item_content.assert_called_once_with(
@@ -2372,7 +2417,7 @@ class TestAzureDevopsGlobalSettings:
         provider.azure_devops_client.get_item_content.side_effect = Exception(
             "Operation returned a 404 status code."
         )
-        assert provider._fetch_global_repo_settings("myorg") == ""
+        assert provider._fetch_global_repo_settings("myorg", "pr-agent-settings") == ""
 
     def test_get_repo_settings_merges_global_then_local(self):
         provider = self._make_provider()
@@ -2384,6 +2429,7 @@ class TestAzureDevopsGlobalSettings:
              patch("pr_agent.git_providers.azuredevops_provider.get_settings") as az:
             az.return_value.azure_devops.get.return_value = "myorg"
             ms.return_value.config.use_global_settings_file = True
+            ms.return_value.config.global_settings_repo = "pr-agent-settings"
             result = provider.get_repo_settings()
 
         assert result == [
@@ -2409,6 +2455,7 @@ class TestAzureDevopsGlobalSettings:
              patch("pr_agent.git_providers.azuredevops_provider.get_settings") as az:
             az.return_value.azure_devops.get.return_value = "myorg"
             ms.return_value.config.use_global_settings_file = True
+            ms.return_value.config.global_settings_repo = "pr-agent-settings"
             assert provider._get_global_repo_settings() == b"[pr_reviewer]\nnum_max_findings = 5\n"
             assert provider._get_global_repo_settings() == b"[pr_reviewer]\nnum_max_findings = 5\n"  # cached
 
@@ -2476,6 +2523,7 @@ class TestAzureDevopsFailuresAreReported:
 
         with patch("pr_agent.git_providers.git_provider.get_settings") as ms:
             ms.return_value.config.use_global_settings_file = True
+            ms.return_value.config.global_settings_repo = "pr-agent-settings"
             captured = {}
             logs = self._capture(lambda: captured.setdefault("files", provider.get_repo_settings()))
 
@@ -2504,6 +2552,7 @@ class TestAzureDevopsFailuresAreReported:
 
         with patch("pr_agent.git_providers.git_provider.get_settings") as ms:
             ms.return_value.config.use_global_settings_file = True
+            ms.return_value.config.global_settings_repo = "pr-agent-settings"
             captured = {}
             errors = self._capture(lambda: captured.setdefault("files", provider.get_repo_settings()))
             all_levels = self._capture(

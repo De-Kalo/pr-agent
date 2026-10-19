@@ -37,8 +37,8 @@ The following files should now be in your repository:
 - ✅ `pyproject.toml` + `uv.lock` - dependencies; the Heroku Python buildpack installs them with uv
 
 Do not add `runtime.txt` or `requirements.txt`: the buildpack rejects more than one package manager file.
-`pyproject.toml` sets `[tool.uv] required-version` to a range (upstream pins an exact uv)
-because the buildpack bundles its own uv version. Re-check this after each upstream sync.
+The buildpack bundles its own uv version; upstream's `[tool.uv] required-version` (`>=0.12.10`) accepts it.
+Re-check this after each upstream sync.
 
 ### 3. Deploy to Heroku
 
@@ -77,7 +77,6 @@ Your existing environment variables should work without changes:
 ## What Changed?
 
 1. **Procfile**: Added to tell Heroku to run gunicorn with the GitHub app server
-2. **pyproject.toml**: uv `required-version` relaxed to a range so the buildpack's uv can build
 
 Upstream `gunicorn_config.py` already binds to Heroku's `PORT`.
 
