@@ -8,6 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -24,6 +25,16 @@ from pr_agent.algo.types import FilePatchInfo
 from pr_agent.algo.utils import Range, process_description
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
+
+
+def cache_languages(get_languages):
+    """Cache non-empty language results per provider instance."""
+    @wraps(get_languages)
+    def wrapper(self):
+        if not getattr(self, "_languages", None):
+            self._languages = get_languages(self)
+        return self._languages
+    return wrapper
 
 
 def get_config_branch() -> str:
@@ -62,6 +73,11 @@ class CodeSuggestionThread:
     suggestion: str
     replies: list[tuple[str, str]] = field(default_factory=list)
     authored_by_agent: Optional[bool] = None
+
+    def text_replies(self) -> list[tuple[str, str]]:
+        """Return the replies that have a non-blank text message, stripped."""
+        return [(author, message.strip()) for author, message in self.replies
+                if isinstance(message, str) and message.strip()]
 
 
 def _discussion_context_budget() -> int:
@@ -121,7 +137,29 @@ class ConcurrentFileUpdateError(RuntimeError):
 
 
 _URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]{0,30}://)[^/@\s]+@")
-_AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic|token)\s+)\S+")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(authorization[ \t]*:[ \t]*[A-Za-z][A-Za-z0-9_-]*[ \t]++)"
+    r"(?!<redacted>[ \t]*(?:[\r\n]|$))[^\r\n]+"
+)
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?i)((?<![a-z0-9])(?:aws_secret_access_key|aws_session_token|aws_access_key_id|"
+    r"secretaccesskey|sessiontoken|accesskeyid|github_token|gitlab_token|ci_job_token|openai_key|openai_api_key|"
+    r"user_token|personal_access_token|bearer_token|basic_token|api_token|api_key|pat|client_secret|"
+    r"webhook_secret|shared_secret|webhook_password)\b[\"']?[ \t]*[:=][ \t]*)"
+    r"(\"(?:\\[^\r\n]|[^\"\\\r\n])*(?:\"|\\?(?=[\r\n]|\Z))|"
+    r"'(?:\\[^\r\n]|[^'\\\r\n])*(?:'|\\?(?=[\r\n]|\Z))|[^\s\"']+)"
+)
+_GITLAB_TOKEN_RE = re.compile(r"\bglpat-[A-Za-z0-9_-]+")
+_AWS_ACCESS_KEY_RE = re.compile(r"\b(?:A3T[A-Z0-9]|AKIA|ASIA)[A-Z0-9]{16}\b")
+# Bare tokens carry no context (no URL, header, or keyword assignment), so they are matched by
+# their documented provider formats. Minimum lengths keep ordinary words and short identifiers
+# from matching; the shapes follow the providers' published token formats.
+_GITHUB_TOKEN_RE = re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}\b")
+_GITHUB_FINE_GRAINED_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{36,255}\b")
+_ANTHROPIC_KEY_RE = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,255}\b")
+_OPENAI_KEY_RE = re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{32,255}\b|\bsk-[A-Za-z0-9]{40,255}\b")
+_GOOGLE_API_KEY_RE = re.compile(r"\bAIza[A-Za-z0-9_-]{32,42}(?![A-Za-z0-9_-])")
+_SLACK_TOKEN_RE = re.compile(r"\bxox[a-z]-[0-9A-Za-z-]{10,255}\b|\bxapp-[0-9A-Za-z-]{10,255}\b")
 
 
 # The reaction PR-Agent has always added when it picks a comment command up. Used as the
@@ -140,11 +178,46 @@ def get_reaction_setting(name: str, default: str = "") -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def redact_credentials(text) -> str:
+def _redact_credential_assignment(match: re.Match) -> str:
+    value = match.group(2)
+    quote = value[0] if value[0] in "\"'" else ""
+    closed = bool(quote and len(value) > 1 and value.endswith(quote))
+    credential = value[1:-1] if closed else value[1:] if quote else value
+    if not credential.strip() or credential.strip().lower() == "<redacted>":
+        return match.group(0)
+    return match.group(1) + quote + "<redacted>" + (quote if closed else "")
+
+
+def redact_credentials(text, *, redaction_counts: dict[str, int] | None = None) -> str:
     if not text:
         return ""
-    redacted = _URL_USERINFO_RE.sub(lambda m: m.group("scheme"), str(text))
-    return _AUTH_HEADER_RE.sub(lambda m: m.group(1) + "<redacted>", redacted)
+    redacted = str(text)
+    for kind, pattern, replacement in (
+        ("url_userinfo", _URL_USERINFO_RE, lambda m: m.group("scheme")),
+        ("authorization_header", _AUTH_HEADER_RE, lambda m: m.group(1) + "<redacted>"),
+        ("credential_assignment", _CREDENTIAL_ASSIGNMENT_RE, _redact_credential_assignment),
+        ("gitlab_token", _GITLAB_TOKEN_RE, "<redacted>"),
+        ("aws_access_key", _AWS_ACCESS_KEY_RE, "<redacted>"),
+        ("github_token", _GITHUB_TOKEN_RE, "<redacted>"),
+        ("github_fine_grained_pat", _GITHUB_FINE_GRAINED_PAT_RE, "<redacted>"),
+        ("anthropic_key", _ANTHROPIC_KEY_RE, "<redacted>"),
+        ("openai_key", _OPENAI_KEY_RE, "<redacted>"),
+        ("google_api_key", _GOOGLE_API_KEY_RE, "<redacted>"),
+        ("slack_token", _SLACK_TOKEN_RE, "<redacted>"),
+    ):
+        count = 0
+
+        def counted_replacement(match, replacement=replacement):
+            nonlocal count
+            result = replacement(match) if callable(replacement) else replacement
+            if result != match.group(0):
+                count += 1
+            return result
+
+        redacted = pattern.sub(counted_replacement, redacted)
+        if count and redaction_counts is not None:
+            redaction_counts[kind] = redaction_counts.get(kind, 0) + count
+    return redacted
 
 
 def _clone_authorization_header(repo_url: str) -> str | None:
@@ -268,6 +341,15 @@ def get_git_ssl_env() -> dict[str, str]:
 
 
 class GitProvider(ABC):
+    def get_request_policy_metadata(self, required_fields: set[str]) -> dict:
+        """Return policy fields; None means unknown, empty values mean not applicable.
+
+        Omit unavailable fields or return None; only their rules are skipped.
+        Read expensive fields (such as labels) only when requested. Lookup errors
+        are handled by the policy layer, which allows the request to continue.
+        """
+        return {}
+
     @abstractmethod
     def is_supported(self, capability: str) -> bool:
         pass
@@ -325,8 +407,7 @@ class GitProvider(ABC):
         for thread in self._iter_code_suggestion_threads():
             if thread.authored_by_agent is False:
                 continue
-            replies = [(author, message.strip()) for author, message in thread.replies
-                       if isinstance(message, str) and message.strip()]
+            replies = thread.text_replies()
             discussion = {
                 "thread_id": thread.thread_id,
                 "status": thread.status,
@@ -347,8 +428,19 @@ class GitProvider(ABC):
         return context
 
     def _iter_code_suggestion_threads(self) -> Iterator[CodeSuggestionThread]:
-        """Yield prior code-suggestion threads, newest first. Providers with suggestion state override this."""
+        """Yield prior code-suggestion threads, newest first. Providers with suggestion state override this.
+
+        Inline /review key-issue threads carry the same dedup marker, so a provider may yield them too;
+        /review reads them to learn which findings a human resolved."""
         return iter(())
+
+    def _iter_review_threads(self) -> Iterator[CodeSuggestionThread]:
+        """Yield review threads with eligible dismissals reported as `resolved`.
+
+        Default to the existing iterator so GitLab and unsupported providers keep their behavior.
+        Providers may override this without expanding the /improve discussion context.
+        """
+        return self._iter_code_suggestion_threads()
 
     def supports_threaded_pr_questions(self) -> bool:
         return False
@@ -469,11 +561,11 @@ class GitProvider(ABC):
             )
             ssl_env = os.environ.copy()
 
-        # Keep the credential out of every git argv: clone the redacted URL and resend the
+        # Keep the credential out of every git argv: remove URL userinfo and resend the
         # token as an http.extraHeader through the GIT_CONFIG_* environment. Git applies
         # that config to the subprocesses it spawns (including git-remote-http) without
         # putting the credential on any command line.
-        clean_repo_url = redact_credentials(repo_url)
+        clean_repo_url = _URL_USERINFO_RE.sub(lambda match: match.group("scheme"), repo_url)
         authorization_header = _clone_authorization_header(repo_url)
         if clean_repo_url != repo_url and authorization_header is not None:
             inherited_count = int(ssl_env.get("GIT_CONFIG_COUNT", "0"))
@@ -541,6 +633,10 @@ class GitProvider(ABC):
     @abstractmethod
     def get_diff_files(self) -> list[FilePatchInfo]:
         pass
+
+    def get_filtered_diff_file_names(self) -> list[str]:
+        """Return changed paths omitted from the diff by file-type filtering."""
+        return getattr(self, "filtered_diff_file_names", [])
 
     def get_incremental_commits(self, is_incremental) -> None:
         return None
@@ -760,14 +856,14 @@ class GitProvider(ABC):
         the provider has no organisation-level home for global settings.
 
         This is the hook that `_get_global_repo_settings` uses to decide which
-        namespace's `pr-agent-settings` repository (or equivalent) to consult.
+        namespace's `config.global_settings_repo` repository to consult.
         Providers that support global settings override this; the default is None,
         which disables global settings for the provider.
         """
         return None
 
     def _get_global_repo_settings(self):
-        """Load the namespace-wide `pr-agent-settings` .pr_agent.toml, if enabled.
+        """Load the namespace-wide `config.global_settings_repo` .pr_agent.toml, if set.
 
         This is a concrete template: it gates on `use_global_settings_file`, resolves
         the owning namespace via `get_owning_namespace()`, and delegates the actual
@@ -778,12 +874,13 @@ class GitProvider(ABC):
         """
         if not get_settings().config.use_global_settings_file:
             return ""
+        settings_repo = get_settings().config.global_settings_repo
         namespace = self.get_owning_namespace()
-        if not namespace:
+        if not settings_repo or not namespace:
             return ""
         return get_cached_global_settings(
             self._get_global_settings_cache_key(namespace),
-            lambda: self._fetch_global_repo_settings(namespace))
+            lambda: self._fetch_global_repo_settings(namespace, settings_repo))
 
     def _get_global_settings_cache_key(self, namespace: str) -> str:
         """Cache key for a namespace's global settings.
@@ -793,14 +890,22 @@ class GitProvider(ABC):
         """
         return f"{type(self).__name__}:{namespace}"
 
-    def _fetch_global_repo_settings(self, namespace: str):
-        """Fetch the raw `.pr_agent.toml` from the namespace's `pr-agent-settings`
+    def _fetch_global_repo_settings(self, namespace: str, settings_repo: str):
+        """Fetch the raw `.pr_agent.toml` from the namespace's `settings_repo`
         repository. Return "" for an expected "not found"/no-access result (so it is
         cached) and let transient/unexpected errors propagate. Overridden per provider."""
         return ""
 
     def get_repo_file_content(self, file_path: str, from_default_branch: bool = False):
         return ""
+
+    def get_issue_content(self, repo_obj, issue_number: int):
+        """Fetch issue content within this provider's authorized repository boundary."""
+        raise NotImplementedError("This provider cannot fetch GitHub issue content")
+
+    def get_sibling_repo(self, repo_id: str):
+        """Resolve a host-approved sibling repository the requester may read."""
+        return None
 
     def get_sibling_repo_file_content(self, repo_id: str, file_path: str, from_default_branch: bool = False):
         """Fetch a single file from a sibling repository in the same namespace/owner.

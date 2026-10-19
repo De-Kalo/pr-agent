@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +15,7 @@ import pytest
 from botocore.exceptions import ClientError, CredentialRetrievalError, ProfileNotFound
 
 import pr_agent.algo.ai_handlers.litellm_ai_handler as litellm_handler
+import pr_agent.algo.ai_handlers.litellm_helpers as litellm_helpers
 from pr_agent.algo.ai_handlers import cloud_auth
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 
@@ -22,6 +24,7 @@ def _base_settings(overrides=None):
     overrides = overrides or {}
     return type("Settings", (), {
         "config": type("Config", (), {
+            "model": overrides.get("config.model"),
             "reasoning_effort": None,
             "ai_timeout": 30,
             "custom_reasoning_model": False,
@@ -811,6 +814,13 @@ async def test_native_aws_environment_without_region_fails_closed(monkeypatch):
 @pytest.mark.parametrize(("model", "model_id", "expected"), (
     ("bedrock/converse/eu-west-1/model", None, "eu-west-1"),
     ("converse/eu-west-1/model", None, "eu-west-1"),
+    ("bedrock/chat_completions/eu-west-1/openai.gpt-oss-120b-1:0", None, "eu-west-1"),
+    ("chat_completions/eu-west-1/openai.gpt-oss-120b-1:0", None, "eu-west-1"),
+    ("bedrock/chat_completions/openai.gpt-oss-120b-1:0",
+     "arn:aws:bedrock:eu-west-1:123:inference-profile/model", "eu-west-1"),
+    ("bedrock/eu-west-1/us.openai.gpt-5.6-sol", None, "eu-west-1"),
+    ("bedrock/us.openai.gpt-5.6-sol",
+     "arn:aws:bedrock:eu-west-1:123:inference-profile/model", "eu-west-1"),
     ("bedrock/arn:aws-cn:bedrock:cn-north-1:123:inference-profile/model", None, "cn-north-1"),
     ("converse/eu-west-1/model", "arn:aws-us-gov:bedrock:us-gov-west-1:123:inference-profile/model", "us-gov-west-1"),
     ("bedrock/eu-west-1/model", "eu-west-2/model", None),
@@ -845,18 +855,26 @@ async def test_bedrock_model_region_does_not_mutate_handler_credentials(monkeypa
 @pytest.mark.parametrize("model_source", ("model_id", "model_arn", "region_path"))
 @pytest.mark.parametrize("explicit_region", (None, "us-east-1"))
 @pytest.mark.parametrize("entrypoint", ("chat", "probe"))
+@pytest.mark.parametrize("route", ("converse", "chat_completions", "chat_completions_default"))
 @pytest.mark.asyncio
-async def test_bedrock_request_region_from_captured_model(monkeypatch, model_source, explicit_region, entrypoint):
+async def test_bedrock_request_region_from_captured_model(
+    monkeypatch, model_source, explicit_region, entrypoint, route,
+):
     from litellm.litellm_core_utils import logging_worker
 
-    native_model = "anthropic.claude-3-haiku-20240307-v1:0"
+    native_model = {
+        "converse": "anthropic.claude-3-haiku-20240307-v1:0",
+        "chat_completions": "openai.gpt-oss-120b-1:0",
+        "chat_completions_default": "us.openai.gpt-5.6-sol",
+    }[route]
+    route_prefix = "chat_completions/" if route == "chat_completions" else ""
     arn = f"arn:aws:bedrock:eu-west-1:123456789012:inference-profile/{native_model}"
-    model = f"bedrock/{native_model}"
-    settings = {"litellm.model_id": arn} if model_source == "model_id" else {}
+    model = f"bedrock/{route_prefix}{native_model}"
+    settings = {"litellm.model_id": arn, "config.model": model} if model_source == "model_id" else {}
     if model_source == "model_arn":
         model = f"bedrock/{arn}"
     elif model_source == "region_path":
-        model = f"bedrock/eu-west-1/{native_model}"
+        model = f"bedrock/{route_prefix}eu-west-1/{native_model}"
     monkeypatch.setattr(litellm_handler, "get_settings", lambda: _base_settings(settings))
     monkeypatch.setattr(litellm, "api_key", None)
     monkeypatch.setenv("LITELLM_RUST", "false")
@@ -865,6 +883,9 @@ async def test_bedrock_request_region_from_captured_model(monkeypatch, model_sou
     if explicit_region:
         monkeypatch.setenv("AWS_REGION_NAME", explicit_region)
     handler = LiteLLMAIHandler()
+    if route == "chat_completions_default":
+        # Isolate region routing from this model's existing sampling restrictions.
+        handler.no_temperature_models = [model]
     settings["litellm.model_id"] = arn.replace("eu-west-1", "ap-south-1")
     monkeypatch.setenv("AWS_REGION_NAME", "ap-south-1")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "later-request-key")
@@ -888,6 +909,12 @@ async def test_bedrock_request_region_from_captured_model(monkeypatch, model_sou
 
     async def send(client, request, **kwargs):
         requests_seen.append(request)
+        if request.url.path == "/openai/v1/chat/completions":
+            return httpx.Response(200, request=request, json={
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0, "model": native_model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
         return httpx.Response(200, request=request, json={
             "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
             "stopReason": "end_turn",
@@ -912,7 +939,11 @@ async def test_bedrock_request_region_from_captured_model(monkeypatch, model_sou
     assert request.url.host == f"bedrock-runtime.{expected_region}.amazonaws.com"
     assert f"/{expected_region}/bedrock/aws4_request" in request.headers["Authorization"]
     assert "Credential=request-key/" in request.headers["Authorization"]
-    assert unquote(request.url.path) == f"/model/{native_model if model_source == 'region_path' else arn}/converse"
+    if route != "converse" and model_source == "region_path":
+        assert request.url.path == "/openai/v1/chat/completions"
+        assert json.loads(request.content)["model"] == native_model
+    else:
+        assert unquote(request.url.path) == f"/model/{native_model if model_source == 'region_path' else arn}/converse"
 
 
 @pytest.mark.parametrize(
@@ -1720,6 +1751,204 @@ async def test_imds_call_lock_serializes_network_calls(monkeypatch, aws_session)
     assert "AWS_ACCESS_KEY_ID" not in os.environ
 
 
+@pytest.mark.parametrize("first_call", ("chat", "probe"))
+@pytest.mark.asyncio
+async def test_imds_stream_cleanup_does_not_hold_call_lock(monkeypatch, aws_session, first_call):
+    monkeypatch.setenv("AWS_USE_IMDS", "true")
+    handler = LiteLLMAIHandler()
+    streaming = True
+    monkeypatch.setattr(handler, "_requires_streaming", lambda model: streaming)
+    monkeypatch.setattr(handler, "_force_streaming_for_request", lambda *args: False)
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    second_dispatched = asyncio.Event()
+
+    class SlowClosingStream:
+        def __aiter__(self):
+            async def chunks():
+                choice = MagicMock()
+                choice.delta.content = "ok"
+                choice.finish_reason = "stop"
+                chunk = MagicMock()
+                chunk.choices = [choice]
+                chunk.usage = None
+                yield chunk
+            return chunks()
+
+        async def aclose(self):
+            close_started.set()
+            await release_close.wait()
+
+    stream = SlowClosingStream()
+
+    async def capture_call(**kwargs):
+        assert handler._aws_bedrock_lock.locked()
+        if kwargs.get("stream"):
+            return stream
+        second_dispatched.set()
+        return _mock_response()
+
+    if first_call == "chat":
+        first = handler.chat_completion(model="bedrock/anthropic.claude-sonnet-4-5", system="sys", user="one")
+    else:
+        first = handler.probe_completion(
+            model="bedrock/anthropic.claude-sonnet-4-5", _completion=capture_call,
+        )
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", side_effect=capture_call):
+        first_task = asyncio.create_task(first)
+        second_task = None
+        results = None
+        try:
+            await asyncio.wait_for(close_started.wait(), 5)
+            streaming = False
+            second_task = asyncio.create_task(handler.chat_completion(
+                model="bedrock/anthropic.claude-sonnet-4-5", system="sys", user="two",
+            ))
+            await asyncio.wait_for(second_dispatched.wait(), 5)
+            assert not first_task.done()
+        finally:
+            release_close.set()
+            results = await asyncio.wait_for(
+                asyncio.gather(*(task for task in (first_task, second_task) if task), return_exceptions=True), 5,
+            )
+
+    assert results == [("ok", "stop") if first_call == "chat" else None, ("ok", "stop")]
+    assert not handler._aws_bedrock_lock.locked()
+    aws_session.get_credentials.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_imds_stream_fallback_closes_first_stream_before_retry(monkeypatch, aws_session):
+    monkeypatch.setenv("AWS_USE_IMDS", "true")
+    monkeypatch.setattr(litellm_handler, "get_settings", _static_aws_settings)
+    handler = LiteLLMAIHandler()
+    monkeypatch.setattr(handler, "_requires_streaming", lambda model: True)
+    monkeypatch.setattr(handler, "_force_streaming_for_request", lambda *args: False)
+
+    class Stream:
+        def __init__(self, content):
+            self.content = content
+            self.closed = False
+
+        def __aiter__(self):
+            async def chunks():
+                if self.content:
+                    choice = MagicMock()
+                    choice.delta.content = self.content
+                    choice.finish_reason = "stop"
+                    chunk = MagicMock()
+                    chunk.choices = [choice]
+                    chunk.usage = None
+                    yield chunk
+            return chunks()
+
+        async def aclose(self):
+            assert not handler._aws_bedrock_lock.locked()
+            self.closed = True
+
+    first = Stream(None)
+    second = Stream("ok")
+    calls = []
+
+    async def complete(**kwargs):
+        assert handler._aws_bedrock_lock.locked()
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return first
+        assert first.closed
+        return second
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", side_effect=complete):
+        result, finish_reason = await handler.chat_completion(
+            model="bedrock/anthropic.claude-sonnet-4-5", system="sys", user="usr",
+        )
+
+    assert (result, finish_reason) == ("ok", "stop")
+    assert len(calls) == 2
+    assert calls[0]["aws_access_key_id"] == "IMDS-KEY"
+    assert calls[1]["aws_access_key_id"] == "STATIC-KEY"
+    assert first.closed and second.closed
+    assert not handler._aws_bedrock_lock.locked()
+
+
+@pytest.mark.parametrize("first_call", ("chat", "probe"))
+@pytest.mark.parametrize("cancel_origin", ("consumer", "iteration"))
+@pytest.mark.asyncio
+async def test_cancelled_imds_stream_cleanup_continues_after_releasing_call_lock(
+    monkeypatch, aws_session, first_call, cancel_origin,
+):
+    monkeypatch.setenv("AWS_USE_IMDS", "true")
+    handler = LiteLLMAIHandler()
+    monkeypatch.setattr(handler, "_requires_streaming", lambda model: True)
+    monkeypatch.setattr(handler, "_force_streaming_for_request", lambda *args: False)
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    consumer_finished = asyncio.Event()
+    cancellation = asyncio.CancelledError("original IMDS iteration cancellation")
+    existing_closers = set(litellm_helpers._stream_close_tasks)
+    closers = ()
+
+    class SlowClosingStream:
+        def __aiter__(self):
+            async def chunks():
+                if cancel_origin == "iteration":
+                    raise cancellation
+                choice = MagicMock()
+                choice.delta.content = "ok"
+                choice.finish_reason = "stop"
+                chunk = MagicMock()
+                chunk.choices = [choice]
+                chunk.usage = None
+                yield chunk
+            return chunks()
+
+        async def aclose(self):
+            close_started.set()
+            await release_close.wait()
+
+    async def complete(**kwargs):
+        return SlowClosingStream()
+
+    if first_call == "chat":
+        request = handler.chat_completion(model="bedrock/anthropic.claude-sonnet-4-5", system="sys", user="usr")
+    else:
+        request = handler.probe_completion(model="bedrock/anthropic.claude-sonnet-4-5", _completion=complete)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", side_effect=complete):
+        task = asyncio.create_task(request)
+        task.add_done_callback(lambda _: consumer_finished.set())
+        try:
+            await asyncio.wait_for(close_started.wait(), 5)
+            assert not handler._aws_bedrock_lock.locked()
+            closers = tuple(litellm_helpers._stream_close_tasks - existing_closers)
+            assert len(closers) == 1
+            if cancel_origin == "consumer":
+                assert not task.done()
+                task.cancel()
+            await asyncio.wait_for(consumer_finished.wait(), timeout=5)
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await task
+            if cancel_origin == "iteration":
+                assert caught.value is cancellation
+                assert task.cancelling() == 0
+            assert not release_close.is_set()
+            assert not closers[0].done()
+            assert closers[0] in litellm_helpers._stream_close_tasks
+            assert not handler._aws_bedrock_lock.locked()
+        finally:
+            release_close.set()
+            await asyncio.wait_for(
+                asyncio.gather(
+                    task, *closers, *(litellm_helpers._stream_close_tasks - existing_closers),
+                    return_exceptions=True,
+                ),
+                timeout=5,
+            )
+
+    assert not handler._aws_bedrock_lock.locked()
+
+
 @pytest.mark.parametrize(
     "error",
     (
@@ -1797,17 +2026,23 @@ async def test_bedrock_api_error_retries_with_static_request_credentials(monkeyp
     ("bedrock/eu-west-1/anthropic.claude-3-haiku-20240307-v1:0", None),
     ("bedrock/anthropic.claude-3-haiku-20240307-v1:0",
      "arn:aws:bedrock:eu-west-1:123:inference-profile/model"),
+    ("bedrock/chat_completions/eu-west-1/openai.gpt-oss-120b-1:0", None),
+    ("bedrock/chat_completions/openai.gpt-oss-120b-1:0",
+     "arn:aws:bedrock:eu-west-1:123:inference-profile/model"),
+    ("bedrock/eu-west-1/us.openai.gpt-5.6-sol", None),
+    ("bedrock/us.openai.gpt-5.6-sol", "arn:aws:bedrock:eu-west-1:123:inference-profile/model"),
 ))
 @pytest.mark.asyncio
 async def test_bedrock_static_fallback_preserves_request_region(monkeypatch, model, model_id):
     monkeypatch.setenv("AWS_USE_IMDS", "true")
-    monkeypatch.setenv("AWS_REGION_NAME", "eu-west-1")
+    monkeypatch.setenv("AWS_REGION_NAME", "ap-south-1")
     monkeypatch.setenv("BEDROCK_MANTLE_API_BASE", "https://bedrock-mantle.eu-west-1.api.aws/v1")
     monkeypatch.setattr(
         litellm_handler,
         "get_settings",
         lambda: _static_aws_settings(
-            session_token="STATIC-TOKEN", overrides={"litellm.model_id": model_id} if model_id else {},
+            session_token="STATIC-TOKEN",
+            overrides={"litellm.model_id": model_id, "config.model": model} if model_id else {},
         ),
     )
     credentials = MagicMock()
@@ -1928,6 +2163,39 @@ async def test_chat_completion_preserves_static_fallback_for_api_errors(monkeypa
     assert completion.await_args_list[0].kwargs["aws_access_key_id"] == "IMDS-KEY"
     assert completion.await_args_list[1].kwargs["aws_access_key_id"] == "STATIC-KEY"
     assert handler._aws_imds_fell_back is True
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_preserves_retry_cause_when_static_fallback_fails(monkeypatch, aws_session):
+    monkeypatch.setenv("AWS_USE_IMDS", "true")
+    monkeypatch.setattr(litellm_handler, "get_settings", _static_aws_settings)
+    handler = LiteLLMAIHandler()
+    initial_error = openai.AuthenticationError(
+        "bad ambient credentials",
+        response=httpx.Response(401, request=httpx.Request("POST", "https://bedrock.example")),
+        body=None,
+    )
+    retry_error = RuntimeError("static fallback timed out")
+    retry_cause = OSError("retry transport failed")
+    retry_error.__cause__ = retry_cause
+    completion = AsyncMock(side_effect=(initial_error, retry_error))
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", completion):
+        with patch.object(litellm_handler, "get_logger") as get_logger:
+            with pytest.raises(RuntimeError, match="static fallback timed out") as exc_info:
+                await handler.chat_completion(
+                    model="bedrock/anthropic.claude-sonnet-4-5", system="sys", user="usr",
+                )
+
+    warnings = [call.args[0] for call in get_logger.return_value.warning.call_args_list]
+    assert f"{litellm_handler.AWS_PROVIDER_CALL_FALLBACK_MESSAGE}: AuthenticationError" in warnings
+    assert all("bad ambient credentials" not in warning for warning in warnings)
+    assert exc_info.value.__cause__ is retry_cause
+    assert exc_info.value.__context__ is not initial_error
+    assert completion.await_count == 2
+    assert completion.await_args_list[0].kwargs["aws_access_key_id"] == "IMDS-KEY"
+    assert completion.await_args_list[1].kwargs["aws_access_key_id"] == "STATIC-KEY"
+    assert not handler._aws_bedrock_lock.locked()
 
 
 @pytest.mark.asyncio
