@@ -69,6 +69,9 @@ dependencies = [
   # Prometheus scrape endpoint for [otel] command telemetry (native /metrics on
   # the webhook apps). Multiprocess-capable; see pr_agent/telemetry/prometheus.py.
   "prometheus-client==0.26.0",
+  # Fork: the Heroku Python buildpack runs `uv sync` without extras, so the GitHub App
+  # provider dependency (upstream's `github` extra) must be a base dependency here.
+  "PyGithub>=2.10,<3",
 ]
 
 [project.urls]

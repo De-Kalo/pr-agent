@@ -40,6 +40,15 @@ Do not add `runtime.txt` or `requirements.txt`: the buildpack rejects more than 
 The buildpack bundles its own uv version; upstream's `[tool.uv] required-version` (`>=0.12.10`) accepts it.
 Re-check this after each upstream sync.
 
+The buildpack runs `uv sync --locked --no-default-groups`, which installs **no extras**. Upstream moved git-provider
+clients into extras (`pr-agent[github]`), so the fork lists `PyGithub` in the base `dependencies` of `pyproject.toml`.
+Without it every webhook fails with "module 'github' is not installed". After each upstream sync, check with:
+
+```bash
+UV_PROJECT_ENVIRONMENT=/tmp/hk uv sync --locked --no-default-groups
+/tmp/hk/bin/python -c 'import pr_agent.git_providers as g; print(g._GIT_PROVIDERS["github"])'
+```
+
 ### 3. Deploy to Heroku
 
 ```bash
