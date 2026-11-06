@@ -146,7 +146,7 @@ jobs:
 
       - name: Run sponsored PR-Agent
         if: steps.authorize.outputs.allowed == 'true'
-        uses: docker://pragent/pr-agent:github_action
+        uses: docker://pragent/pr-agent@sha256:b1ed6e8de56eb4d6e4169ee0d5c209bb5ed1ef071a01c0c042c64b80192a785c  # was :github_action (mutable tag); bump deliberately
         with:
           entrypoint: /bin/sh
           args: >-
