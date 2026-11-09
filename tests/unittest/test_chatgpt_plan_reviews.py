@@ -18,8 +18,9 @@ async def test_chatgpt_plan_review_fallbacks(monkeypatch, winner):
 
     async def send(request):
         calls.append("plan")
-        assert request.url == "https://api.openai.com/v1/responses"
+        assert request.url == "https://chatgpt.com/backend-api/codex/responses"
         assert request.headers["authorization"] == "Bearer plan-token"
+        assert request.headers["chatgpt-account-id"] == "account-1"
         payload = json.loads(request.content)
         assert payload == {
             "model": "gpt-5.6",
@@ -68,7 +69,9 @@ async def test_chatgpt_plan_review_fallbacks(monkeypatch, winner):
     settings.set("config.fallback_models", [])
     with request_cycle_context({"settings": settings}):
         init_run_details()
-        handler = chatgpt_plan.ChatGPTPlanAIHandler(access_token="plan-token", token="claude-token")
+        handler = chatgpt_plan.ChatGPTPlanAIHandler(
+            access_token="plan-token", account_id="account-1", token="claude-token"
+        )
 
         async def predict(model):
             return await handler.chat_completion(model, "system", "diff")

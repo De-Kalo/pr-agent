@@ -23,6 +23,9 @@ _CALLBACK = f"{_PATH}/callback"
 _STATE_COOKIE = "__Host-pr-agent-claude-state"
 _SESSION_COOKIE = "__Host-pr-agent-claude-session"
 _SESSION_SECONDS = 600
+_FORM_LIMIT = 65_536
+_CHATGPT_REFRESH_URL = "https://auth.openai.com/oauth/token"
+_CHATGPT_REFRESH_MARGIN_SECONDS = 3600
 _HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -81,20 +84,112 @@ def get_registered_token(installation_id: int, user_id: int) -> str:
     return token if isinstance(token, str) else ""
 
 
-def get_registered_chatgpt_plan_token(installation_id: int, user_id: int) -> str:
-    raw = _token_store().get_secret(f"pr-agent/chatgpt-plan/{installation_id}/{user_id}")
-    if not raw:
-        return ""
-    credentials = json.loads(raw)
-    expires_at = credentials.get("expires_at")
-    token = credentials.get("access_token")
-    if type(expires_at) is int and expires_at > time.time() + 30 and isinstance(token, str):
-        return token.strip()
-    return ""
+@dataclass(frozen=True)
+class ChatGPTPlanCredentials:
+    access_token: str = field(repr=False)
+    account_id: str
+
+
+def _chatgpt_secret_name(installation_id: int, user_id: int) -> str:
+    return f"pr-agent/chatgpt-plan/{installation_id}/{user_id}"
+
+
+def _chatgpt_record(access_token: str, refresh_token: str, account_id: str) -> dict | None:
+    """Build the stored record; expiry and OAuth client come from the access token's own claims."""
+    try:
+        claims = jwt.decode(access_token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        return None
+    expires_at = claims.get("exp")
+    client_id = claims.get("client_id")
+    if type(expires_at) is not int or not isinstance(client_id, str) or not client_id:
+        return None
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "account_id": account_id,
+        "client_id": client_id,
+        "expires_at": expires_at,
+    }
+
+
+def _parse_codex_auth(raw: str) -> dict | None:
+    """Accept the auth.json written by `codex login` with a ChatGPT account."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+    values = [tokens.get(key) for key in ("access_token", "refresh_token", "account_id")]
+    if not all(isinstance(value, str) and value.strip() for value in values):
+        return None
+    return _chatgpt_record(*(value.strip() for value in values))
+
+
+def _load_chatgpt_record(store, name: str) -> dict | None:
+    raw = store.get_secret(name)
+    record = json.loads(raw) if raw else {}
+    if (
+        not isinstance(record, dict)
+        or not all(isinstance(record.get(key), str) and record[key]
+                   for key in ("access_token", "refresh_token", "account_id", "client_id"))
+        or type(record.get("expires_at")) is not int
+    ):
+        return None
+    return record
+
+
+def _refresh_chatgpt_record(record: dict) -> dict:
+    response = httpx.post(
+        _CHATGPT_REFRESH_URL,
+        json={
+            "client_id": record["client_id"],
+            "grant_type": "refresh_token",
+            "refresh_token": record["refresh_token"],
+            "scope": "openid profile email",
+        },
+        timeout=10,
+        trust_env=False,
+    )
+    response.raise_for_status()
+    data = response.json()
+    refresh_token = data.get("refresh_token") or record["refresh_token"]
+    access_token = data.get("access_token")
+    refreshed = _chatgpt_record(access_token, refresh_token, record["account_id"]) if access_token else None
+    if refreshed is None:
+        raise ValueError("The ChatGPT token refresh returned no usable access token.")
+    return refreshed
+
+
+def get_registered_chatgpt_plan_credentials(installation_id: int, user_id: int) -> ChatGPTPlanCredentials | None:
+    store = _token_store()
+    name = _chatgpt_secret_name(installation_id, user_id)
+    record = _load_chatgpt_record(store, name)
+    if record is None:
+        return None
+    if record["expires_at"] <= time.time() + _CHATGPT_REFRESH_MARGIN_SECONDS:
+        try:
+            refreshed = _refresh_chatgpt_record(record)
+        except (httpx.HTTPError, ValueError):
+            # Refresh tokens rotate, so another worker may have refreshed first; use its record if current.
+            get_logger().warning("Could not refresh a registered ChatGPT plan token.")
+            record = _load_chatgpt_record(store, name)
+            if record is None or record["expires_at"] <= time.time() + 30:
+                return None
+        else:
+            store.store_secret(name, json.dumps(refreshed))
+            record = refreshed
+    return ChatGPTPlanCredentials(record["access_token"], record["account_id"])
 
 
 def _save_registered_token(installation_id: int, user_id: int, token: str) -> None:
     _token_store().store_secret(_secret_name(installation_id, user_id), json.dumps({"token": token}))
+
+
+def _save_chatgpt_record(installation_id: int, user_id: int, record: dict) -> None:
+    _token_store().store_secret(_chatgpt_secret_name(installation_id, user_id), json.dumps(record))
 
 
 def _audience(config: _PortalConfig, cookie: str) -> str:
@@ -140,6 +235,21 @@ async def token_page(request: Request):
   <button name="action" value="save">Save or replace token</button>
   <button name="action" value="remove" formnovalidate>Remove token</button>
 </form>"""
+        if global_settings.get("github_app.author_chatgpt_plan_model"):
+            content += f"""
+<h2>ChatGPT plan</h2>
+<p>Reviews of your PRs can use your ChatGPT plan's Codex usage first. Sign in with a separate Codex profile,
+so your own Codex CLI stays signed in:</p>
+<pre><code>mkdir -p ~/.codex-pr-agent
+CODEX_HOME=~/.codex-pr-agent codex login</code></pre>
+<p>Then paste the contents of <code>~/.codex-pr-agent/auth.json</code> below.</p>
+<form method="post" action="{_PATH}" autocomplete="off">
+  <input type="hidden" name="csrf" value="{csrf}">
+  <label for="codex_auth">Codex auth.json</label>
+  <textarea name="codex_auth" id="codex_auth" rows="6" maxlength="32768" spellcheck="false" required></textarea>
+  <button name="action" value="save_chatgpt">Connect ChatGPT</button>
+  <button name="action" value="remove_chatgpt" formnovalidate>Disconnect ChatGPT</button>
+</form>"""
     else:
         content = (
             '<p>Sign in with your GitHub organization account.</p>'
@@ -148,9 +258,9 @@ async def token_page(request: Request):
     return HTMLResponse(
         f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PR-Agent Claude setup</title><style>
+<title>PR-Agent review setup</title><style>
 body {{ font: 1rem system-ui, sans-serif; margin: 3rem auto; padding: 0 1rem; max-width: 36rem; line-height: 1.6; }}
-label {{ display: block; }} input[type=password] {{ display: block; width: 100%; box-sizing: border-box;
+label {{ display: block; }} input[type=password], textarea {{ display: block; width: 100%; box-sizing: border-box;
 font: inherit; padding: .5rem; margin-bottom: 1rem; }} button {{ font: inherit; margin: 0 .5rem .5rem 0; }}
 </style></head><body><main><h1>Claude Code for PR reviews</h1>{content}</main></body></html>""",
         headers=_HEADERS,
@@ -236,7 +346,7 @@ async def token_save(request: Request):
         raise HTTPException(415, "Unsupported form type.")
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > 16_384:
+        if len(body) + len(chunk) > _FORM_LIMIT:
             raise HTTPException(413, "Form is too large.")
         body.extend(chunk)
     try:
@@ -247,6 +357,8 @@ async def token_save(request: Request):
     if not secrets.compare_digest(csrf.encode(), session["csrf"].encode()):
         raise HTTPException(403, "Invalid or expired form.")
     action = form.get("action", [""])[0]
+    if action in ("save_chatgpt", "remove_chatgpt"):
+        return await _update_chatgpt_plan(config, session["user_id"], action, form.get("codex_auth", [""])[0])
     token = form.get("token", [""])[0].strip() if action == "save" else ""
     if action not in ("save", "remove") or (action == "save" and not re.fullmatch(r"[!-~]{20,4096}", token)):
         raise HTTPException(400, "Enter a valid Claude Code setup token.")
@@ -256,4 +368,21 @@ async def token_save(request: Request):
         get_logger().warning("Could not update a registered Claude Code token.")
         raise HTTPException(503, "Token storage is temporarily unavailable.") from None
     status = "Token saved." if token else "Token removed."
+    return HTMLResponse(f'<p>{status}</p><a href="{_PATH}">Back to setup</a>', headers=_HEADERS)
+
+
+async def _update_chatgpt_plan(config: _PortalConfig, user_id: int, action: str, codex_auth: str) -> HTMLResponse:
+    if not global_settings.get("github_app.author_chatgpt_plan_model"):
+        raise HTTPException(404)
+    record = {}
+    if action == "save_chatgpt":
+        record = _parse_codex_auth(codex_auth) if len(codex_auth) <= 32_768 else None
+        if record is None:
+            raise HTTPException(400, "Paste the auth.json written by `codex login` with a ChatGPT account.")
+    try:
+        await asyncio.to_thread(_save_chatgpt_record, config.installation_id, user_id, record)
+    except Exception:
+        get_logger().warning("Could not update a registered ChatGPT plan token.")
+        raise HTTPException(503, "Token storage is temporarily unavailable.") from None
+    status = "ChatGPT connected." if record else "ChatGPT disconnected."
     return HTMLResponse(f'<p>{status}</p><a href="{_PATH}">Back to setup</a>', headers=_HEADERS)

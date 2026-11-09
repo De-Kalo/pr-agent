@@ -1,7 +1,9 @@
+import json
 import re
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -23,6 +25,7 @@ def portal_settings(monkeypatch):
     }
     monkeypatch.setattr(portal, "global_settings", settings)
     monkeypatch.setattr(github_app, "global_settings", settings)
+    return settings
 
 
 def test_portal_binds_token_to_signed_in_user(portal_settings, monkeypatch):
@@ -106,13 +109,26 @@ async def test_webhook_loads_only_the_portal_installations_token(portal_settings
     assert await github_app._pr_author_claude_token(body) == ""
 
 
+def _access_token(exp, client_id="codex-client"):
+    return jwt.encode({"exp": exp, "client_id": client_id}, "unused-signing-key-of-32-bytes-min", algorithm="HS256")
+
+
+def _plan_record(exp, refresh_token="refresh-1"):
+    return json.dumps({
+        "access_token": _access_token(exp),
+        "refresh_token": refresh_token,
+        "account_id": "account-1",
+        "client_id": "codex-client",
+        "expires_at": exp,
+    })
+
+
 async def test_webhook_loads_only_a_current_plan_token_for_the_pr_author(portal_settings, monkeypatch):
-    expires_at = 2000
+    records = {"pr-agent/chatgpt-plan/7/42": _plan_record(100_000)}
 
     class TokenStore:
         def get_secret(self, name):
-            assert name == "pr-agent/chatgpt-plan/7/42"
-            return f'{{"access_token": "plan-token", "expires_at": {expires_at}}}'
+            return records.get(name, "")
 
     monkeypatch.setattr(portal, "_token_store", TokenStore)
     monkeypatch.setattr(portal.time, "time", lambda: 1000)
@@ -121,9 +137,113 @@ async def test_webhook_loads_only_a_current_plan_token_for_the_pr_author(portal_
         "sender": {"id": 42},
         "pull_request": {"user": {"id": 42, "type": "User"}},
     }
-    assert await github_app._pr_author_chatgpt_plan_token(body) == "plan-token"
-    expires_at = 900
-    assert await github_app._pr_author_chatgpt_plan_token(body) == ""
-    expires_at = 2000
+    plan = await github_app._pr_author_chatgpt_plan_credentials(body)
+    assert (plan.access_token, plan.account_id) == (_access_token(100_000), "account-1")
+    assert "access_token" not in repr(plan)
+    records["pr-agent/chatgpt-plan/7/42"] = "{}"
+    assert await github_app._pr_author_chatgpt_plan_credentials(body) is None
+    records["pr-agent/chatgpt-plan/7/42"] = _plan_record(100_000)
     body["sender"]["id"] = 43
-    assert await github_app._pr_author_chatgpt_plan_token(body) == ""
+    assert await github_app._pr_author_chatgpt_plan_credentials(body) is None
+
+
+def test_plan_token_refreshes_before_expiry(monkeypatch):
+    records = {"pr-agent/chatgpt-plan/7/42": _plan_record(2000)}
+
+    class Store:
+        def get_secret(self, name):
+            return records.get(name, "")
+
+        def store_secret(self, name, value):
+            records[name] = value
+
+    def refresh(url, json, **kwargs):
+        assert url == "https://auth.openai.com/oauth/token"
+        assert json["grant_type"] == "refresh_token"
+        assert (json["client_id"], json["refresh_token"]) == ("codex-client", "refresh-1")
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, json={"access_token": _access_token(90_000), "refresh_token": "refresh-2"},
+                              request=request)
+
+    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal.time, "time", lambda: 1000)
+    monkeypatch.setattr(portal.httpx, "post", refresh)
+    plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
+    assert plan.access_token == _access_token(90_000)
+    stored = json.loads(records["pr-agent/chatgpt-plan/7/42"])
+    assert (stored["refresh_token"], stored["expires_at"]) == ("refresh-2", 90_000)
+
+
+@pytest.mark.parametrize("other_worker_refreshed", [True, False])
+def test_failed_plan_refresh_uses_another_workers_record(monkeypatch, other_worker_refreshed):
+    reads = [_plan_record(1010), _plan_record(90_000, "refresh-2") if other_worker_refreshed else _plan_record(1010)]
+
+    class Store:
+        def get_secret(self, name):
+            return reads.pop(0)
+
+        def store_secret(self, name, value):
+            raise AssertionError("A failed refresh must not overwrite the stored record.")
+
+    def refresh(url, **kwargs):
+        return httpx.Response(401, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal.time, "time", lambda: 1000)
+    monkeypatch.setattr(portal.httpx, "post", refresh)
+    plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
+    assert (plan is not None) == other_worker_refreshed
+
+
+def test_portal_connects_chatgpt_from_codex_auth(portal_settings, monkeypatch):
+    portal_settings["github_app.author_chatgpt_plan_model"] = "gpt-5.6-sol"
+    records = {}
+
+    class Store:
+        def store_secret(self, name, value):
+            records[name] = value
+
+        def get_secret(self, name):
+            return records.get(name, "")
+
+    async def github_member(config, code, verifier):
+        return 42
+
+    monkeypatch.setattr(portal, "_github_member_id", github_member)
+    monkeypatch.setattr(portal, "_token_store", Store)
+    client = TestClient(github_app.app, base_url="https://example.test")
+    login = client.get("/claude-token/login", follow_redirects=False)
+    state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+    page = client.get("/claude-token/callback", params={"code": "github-code", "state": state})
+    assert "Connect ChatGPT" in page.text
+    csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+    access_token = _access_token(4_000_000_000)
+    auth = json.dumps({"auth_mode": "chatgpt", "tokens": {
+        "id_token": "id", "access_token": access_token, "refresh_token": "refresh-1", "account_id": "account-1",
+    }})
+
+    bad = client.post("/claude-token", data={"action": "save_chatgpt", "csrf": csrf, "codex_auth": "{}"})
+    assert bad.status_code == 400
+    saved = client.post("/claude-token", data={"action": "save_chatgpt", "csrf": csrf, "codex_auth": auth})
+    assert saved.status_code == 200
+    assert access_token not in saved.text
+    plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
+    assert (plan.access_token, plan.account_id) == (access_token, "account-1")
+
+    removed = client.post("/claude-token", data={"action": "remove_chatgpt", "csrf": csrf})
+    assert removed.status_code == 200
+    assert portal.get_registered_chatgpt_plan_credentials(7, 42) is None
+
+
+def test_portal_hides_chatgpt_until_a_plan_model_is_configured(portal_settings, monkeypatch):
+    async def github_member(config, code, verifier):
+        return 42
+
+    monkeypatch.setattr(portal, "_github_member_id", github_member)
+    client = TestClient(github_app.app, base_url="https://example.test")
+    login = client.get("/claude-token/login", follow_redirects=False)
+    state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+    page = client.get("/claude-token/callback", params={"code": "github-code", "state": state})
+    assert "Connect ChatGPT" not in page.text
+    csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
+    assert client.post("/claude-token", data={"action": "remove_chatgpt", "csrf": csrf}).status_code == 404

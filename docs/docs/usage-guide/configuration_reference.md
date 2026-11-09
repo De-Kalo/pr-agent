@@ -366,7 +366,7 @@ _This section only documents commented-out examples; see the [TOML source](https
 | `feedback_on_draft_pr` | false |  |
 | `author_claude_tokens` | false | Deployment-only opt-in to per-author Claude Code setup tokens for automatic PR commands. |
 | `author_claude_model` | "claude-sonnet-4-6" | Try this model before the regular model chain for registered authors. |
-| `author_chatgpt_plan_model` | "" | Deployment-only. Set an approved model ID to try ChatGPT plan usage before Claude. |
+| `author_chatgpt_plan_model` | "" | Deployment-only. Set a ChatGPT plan Codex model ID to try plan usage before Claude. |
 | `claude_token_org` | "" | Configure these deployment settings to enable internal self-service token registration. |
 | `claude_token_installation_id` | 0 |  |
 | `claude_token_callback_url` | "" |  |
