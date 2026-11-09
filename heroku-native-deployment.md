@@ -52,8 +52,8 @@ UV_PROJECT_ENVIRONMENT=/tmp/hk uv sync --locked --no-default-groups
 ### Use each PR author's Claude subscription
 
 This setup is for an internal, self-hosted GitHub App whose authors opt in with their own Claude subscriptions.
-Make the official Claude Code CLI available as `claude` on the dyno's PATH. The Python buildpack alone does not
-install it. Use a release with `--safe-mode` support, such as 2.1.319 or newer.
+The Heroku Python build runs `bin/post_compile` to install a pinned, checksum-verified Claude Code binary
+and the existing `codecommit` extra, which includes `boto3`.
 
 Set these deployment config vars. Keep the existing OpenAI credentials and model configuration. The author's
 Claude model is tried first, then PR-Agent uses its regular model chain.
@@ -75,9 +75,7 @@ and submitted-review commands use the regular backend and its configured model c
 1. In the GitHub App settings, add `https://<app-host>/claude-token/callback` as a user authorization callback
    URL. Grant the app **Members: Read-only** organization permission and approve the updated permissions on
    the installation.
-2. Include `boto3` in the deployment image using the existing `codecommit` extra
-   (`uv sync --locked --extra codecommit`). The stock Heroku Python buildpack skips extras. Give the app AWS
-   credentials with `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, and
+2. Give the app AWS credentials with `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, and
    `secretsmanager:CreateSecret` scoped to `pr-agent/claude-code/<installation_id>/*`.
 3. Configure the screen with these deployment settings.
 
@@ -205,16 +203,3 @@ After successful deployment:
 2. Test webhook functionality
 3. Check if the ~50 second crash issue is resolved
 4. Adjust dyno size if needed (may be able to downgrade from Performance-M)
-
-
-
-
-
-
-
-
-
-
-
-
-

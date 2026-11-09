@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# The Heroku Python buildpack omits extras on its initial sync.
+uv sync --locked --no-default-groups --extra codecommit
+
+claude_version=2.1.319
+case "$(uname -m)" in
+    x86_64)
+        platform=linux-x64
+        checksum=dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed
+        ;;
+    aarch64)
+        platform=linux-arm64
+        checksum=a7e687fd1cb054d651c7588223de3786c99d4c682365e3c3ae1e59ce7f3a591f
+        ;;
+    *)
+        echo "Unsupported architecture for Claude Code." >&2
+        exit 1
+        ;;
+esac
+
+download=$(mktemp)
+trap 'rm -f "$download"' EXIT
+curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+    "https://downloads.claude.ai/claude-code-releases/$claude_version/$platform/claude" -o "$download"
+printf '%s  %s\n' "$checksum" "$download" | sha256sum --check --status
+install -m 0755 "$download" "${UV_PROJECT_ENVIRONMENT:?Heroku Python environment is missing}/bin/claude"
