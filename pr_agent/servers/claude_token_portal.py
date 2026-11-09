@@ -128,8 +128,8 @@ def _parse_codex_auth(raw: str) -> dict | None:
     return _chatgpt_record(*(value.strip() for value in values))
 
 
-def _load_chatgpt_record(store, name: str) -> dict | None:
-    raw = store.get_secret(name)
+def _load_chatgpt_record(store, name: str) -> tuple[dict | None, str]:
+    raw, version_id = store.get_secret_version(name)
     record = json.loads(raw) if raw else {}
     if (
         not isinstance(record, dict)
@@ -137,8 +137,8 @@ def _load_chatgpt_record(store, name: str) -> dict | None:
                    for key in ("access_token", "refresh_token", "account_id", "client_id"))
         or type(record.get("expires_at")) is not int
     ):
-        return None
-    return record
+        return None, version_id
+    return record, version_id
 
 
 def _refresh_chatgpt_record(record: dict) -> dict:
@@ -166,30 +166,23 @@ def _refresh_chatgpt_record(record: dict) -> dict:
 def get_registered_chatgpt_plan_credentials(installation_id: int, user_id: int) -> ChatGPTPlanCredentials | None:
     store = _token_store()
     name = _chatgpt_secret_name(installation_id, user_id)
-    record = _load_chatgpt_record(store, name)
+    record, version_id = _load_chatgpt_record(store, name)
     if record is None:
         return None
     if record["expires_at"] <= time.time() + _CHATGPT_REFRESH_MARGIN_SECONDS:
         try:
             refreshed = _refresh_chatgpt_record(record)
         except (httpx.HTTPError, ValueError):
-            # Refresh tokens rotate, so another worker may have refreshed first; use its record if current.
             get_logger().warning("Could not refresh a registered ChatGPT plan token.")
-            record = _load_chatgpt_record(store, name)
+            refreshed = None
+        # The conditional replace fails if the member disconnected or reconnected, or another worker
+        # refreshed first; refresh tokens rotate, so then use whatever record is current.
+        if refreshed is not None and store.replace_secret_if_current(name, json.dumps(refreshed), version_id):
+            record = refreshed
+        else:
+            record, _ = _load_chatgpt_record(store, name)
             if record is None or record["expires_at"] <= time.time() + 30:
                 return None
-        else:
-            # Re-read before writing, so a refresh never overwrites a disconnect or a newly pasted login.
-            current = _load_chatgpt_record(store, name)
-            if current is None:
-                return None
-            if current["refresh_token"] != record["refresh_token"]:
-                record = current
-                if record["expires_at"] <= time.time() + 30:
-                    return None
-            else:
-                store.store_secret(name, json.dumps(refreshed))
-                record = refreshed
     return ChatGPTPlanCredentials(record["access_token"], record["account_id"])
 
 

@@ -134,3 +134,21 @@ class TestAWSSecretsManagerProvider:
             provider.store_secret('test-secret', 'test-value')
 
         assert caught.value is error
+
+    @pytest.mark.parametrize("still_current", [True, False])
+    def test_replace_secret_if_current_moves_awscurrent_conditionally(self, still_current):
+        provider, mock_client = self._provider()
+        mock_client.put_secret_value.return_value = {'VersionId': 'new-version'}
+        if not still_current:
+            mock_client.update_secret_version_stage.side_effect = ClientError(
+                {"Error": {"Code": "InvalidParameterException", "Message": "AWS error"}}, "UpdateSecretVersionStage"
+            )
+
+        assert provider.replace_secret_if_current('test-secret', 'new-value', 'read-version') is still_current
+        mock_client.put_secret_value.assert_called_once_with(
+            SecretId='test-secret', SecretString='new-value', VersionStages=['PR_AGENT_CANDIDATE']
+        )
+        mock_client.update_secret_version_stage.assert_called_once_with(
+            SecretId='test-secret', VersionStage='AWSCURRENT', MoveToVersionId='new-version',
+            RemoveFromVersionId='read-version',
+        )

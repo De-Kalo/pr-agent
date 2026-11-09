@@ -123,14 +123,38 @@ def _plan_record(exp, refresh_token="refresh-1"):
     })
 
 
+class VersionedStore:
+    """In-memory stand-in for the Secrets Manager versioning used by the token portal."""
+
+    def __init__(self, records=None):
+        self.records = {name: (value, 1) for name, value in (records or {}).items()}
+
+    def get_secret(self, name):
+        return self.get_secret_version(name)[0]
+
+    def get_secret_version(self, name):
+        value, version = self.records.get(name, ("", 0))
+        return value, str(version) if value else ""
+
+    def store_secret(self, name, value):
+        self.records[name] = (value, self.records.get(name, ("", 0))[1] + 1)
+
+    def replace_secret_if_current(self, name, value, version_id):
+        if self.get_secret_version(name)[1] != version_id:
+            return False
+        self.store_secret(name, value)
+        return True
+
+
+def _refresh_response(url, access_exp=90_000, refresh_token="refresh-2"):
+    return httpx.Response(200, json={"access_token": _access_token(access_exp), "refresh_token": refresh_token},
+                          request=httpx.Request("POST", url))
+
+
 async def test_webhook_loads_only_a_current_plan_token_for_the_pr_author(portal_settings, monkeypatch):
-    records = {"pr-agent/chatgpt-plan/7/42": _plan_record(100_000)}
-
-    class TokenStore:
-        def get_secret(self, name):
-            return records.get(name, "")
-
-    monkeypatch.setattr(portal, "_token_store", TokenStore)
+    name = "pr-agent/chatgpt-plan/7/42"
+    store = VersionedStore({name: _plan_record(100_000)})
+    monkeypatch.setattr(portal, "_token_store", lambda: store)
     monkeypatch.setattr(portal.time, "time", lambda: 1000)
     body = {
         "installation": {"id": 7},
@@ -140,83 +164,65 @@ async def test_webhook_loads_only_a_current_plan_token_for_the_pr_author(portal_
     plan = await github_app._pr_author_chatgpt_plan_credentials(body)
     assert (plan.access_token, plan.account_id) == (_access_token(100_000), "account-1")
     assert "access_token" not in repr(plan)
-    records["pr-agent/chatgpt-plan/7/42"] = "{}"
+    store.store_secret(name, "{}")
     assert await github_app._pr_author_chatgpt_plan_credentials(body) is None
-    records["pr-agent/chatgpt-plan/7/42"] = _plan_record(100_000)
+    store.store_secret(name, _plan_record(100_000))
     body["sender"]["id"] = 43
     assert await github_app._pr_author_chatgpt_plan_credentials(body) is None
 
 
 def test_plan_token_refreshes_before_expiry(monkeypatch):
-    records = {"pr-agent/chatgpt-plan/7/42": _plan_record(2000)}
-
-    class Store:
-        def get_secret(self, name):
-            return records.get(name, "")
-
-        def store_secret(self, name, value):
-            records[name] = value
+    name = "pr-agent/chatgpt-plan/7/42"
+    store = VersionedStore({name: _plan_record(2000)})
 
     def refresh(url, json, **kwargs):
         assert url == "https://auth.openai.com/oauth/token"
         assert json["grant_type"] == "refresh_token"
         assert (json["client_id"], json["refresh_token"]) == ("codex-client", "refresh-1")
-        request = httpx.Request("POST", url)
-        return httpx.Response(200, json={"access_token": _access_token(90_000), "refresh_token": "refresh-2"},
-                              request=request)
+        return _refresh_response(url)
 
-    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal, "_token_store", lambda: store)
     monkeypatch.setattr(portal.time, "time", lambda: 1000)
     monkeypatch.setattr(portal.httpx, "post", refresh)
     plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
     assert plan.access_token == _access_token(90_000)
-    stored = json.loads(records["pr-agent/chatgpt-plan/7/42"])
+    stored = json.loads(store.get_secret(name))
     assert (stored["refresh_token"], stored["expires_at"]) == ("refresh-2", 90_000)
 
 
-@pytest.mark.parametrize("change", ["disconnected", "replaced"])
+@pytest.mark.parametrize("change", ["disconnected", "replaced", "refreshed by another worker"])
 def test_plan_refresh_does_not_overwrite_a_change_made_during_refresh(monkeypatch, change):
     name = "pr-agent/chatgpt-plan/7/42"
-    replacement = _plan_record(80_000, "refresh-new")
-    records = {name: _plan_record(2000)}
+    store = VersionedStore({name: _plan_record(2000)})
+    newer = {"disconnected": "{}", "replaced": _plan_record(80_000, "refresh-new"),
+             "refreshed by another worker": _plan_record(85_000, "refresh-other")}[change]
 
-    class Store:
-        def get_secret(self, secret_name):
-            return records.get(secret_name, "")
+    def refresh(url, **kwargs):
+        store.store_secret(name, newer)
+        return _refresh_response(url)
 
-        def store_secret(self, secret_name, value):
-            raise AssertionError("The refresh must not overwrite a newer member change.")
-
-    def refresh(url, json, **kwargs):
-        records[name] = "{}" if change == "disconnected" else replacement
-        return httpx.Response(200, json={"access_token": _access_token(90_000), "refresh_token": "refresh-2"},
-                              request=httpx.Request("POST", url))
-
-    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal, "_token_store", lambda: store)
     monkeypatch.setattr(portal.time, "time", lambda: 1000)
     monkeypatch.setattr(portal.httpx, "post", refresh)
     plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
+    assert store.get_secret(name) == newer
     if change == "disconnected":
         assert plan is None
     else:
-        assert plan.access_token == _access_token(80_000)
+        assert plan.access_token == json.loads(newer)["access_token"]
 
 
 @pytest.mark.parametrize("other_worker_refreshed", [True, False])
 def test_failed_plan_refresh_uses_another_workers_record(monkeypatch, other_worker_refreshed):
-    reads = [_plan_record(1010), _plan_record(90_000, "refresh-2") if other_worker_refreshed else _plan_record(1010)]
-
-    class Store:
-        def get_secret(self, name):
-            return reads.pop(0)
-
-        def store_secret(self, name, value):
-            raise AssertionError("A failed refresh must not overwrite the stored record.")
+    name = "pr-agent/chatgpt-plan/7/42"
+    store = VersionedStore({name: _plan_record(1010)})
 
     def refresh(url, **kwargs):
+        if other_worker_refreshed:
+            store.store_secret(name, _plan_record(90_000, "refresh-2"))
         return httpx.Response(401, request=httpx.Request("POST", url))
 
-    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal, "_token_store", lambda: store)
     monkeypatch.setattr(portal.time, "time", lambda: 1000)
     monkeypatch.setattr(portal.httpx, "post", refresh)
     plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
@@ -225,20 +231,13 @@ def test_failed_plan_refresh_uses_another_workers_record(monkeypatch, other_work
 
 def test_portal_connects_chatgpt_from_codex_auth(portal_settings, monkeypatch):
     portal_settings["github_app.author_chatgpt_plan_model"] = "gpt-5.6-sol"
-    records = {}
-
-    class Store:
-        def store_secret(self, name, value):
-            records[name] = value
-
-        def get_secret(self, name):
-            return records.get(name, "")
+    store = VersionedStore()
 
     async def github_member(config, code, verifier):
         return 42
 
     monkeypatch.setattr(portal, "_github_member_id", github_member)
-    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal, "_token_store", lambda: store)
     client = TestClient(github_app.app, base_url="https://example.test")
     login = client.get("/claude-token/login", follow_redirects=False)
     state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]

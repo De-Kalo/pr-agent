@@ -85,8 +85,9 @@ CODEX_HOME=~/.codex-pr-agent codex login
 
 They paste `~/.codex-pr-agent/auth.json` into the form. The app stores the access token, refresh token, account
 ID, and expiry under `pr-agent/chatgpt-plan/<installation_id>/<user_id>` and refreshes the access token through
-the Codex OAuth client before it expires. The runtime identity needs `secretsmanager:GetSecretValue`,
-`secretsmanager:PutSecretValue`, and `secretsmanager:CreateSecret` on that prefix. Reviews try the author's
+the Codex OAuth client before it expires. A refresh is saved only if the record is unchanged, so it never undoes a
+disconnect. The runtime identity needs `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`,
+`secretsmanager:CreateSecret`, and `secretsmanager:UpdateSecretVersionStage` on that prefix. Reviews try the author's
 ChatGPT plan, then Claude Code if registered, then the regular model chain. Plan reviews use the author's own
 Codex usage limits, and reviews fall back when those limits are reached. The footer identifies successful plan
 reviews as **ChatGPT plan token**.
