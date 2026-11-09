@@ -89,6 +89,18 @@ MAX_REVIEW_COVERAGE_FILES = 50
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
 REVIEW_PROGRESS_COMMENT = "Preparing review..."
 
+
+def _review_model_footer() -> str:
+    details = get_run_details()
+    if details is None or not details.model_used or not details.model_sources:
+        return ""
+    models = details.models_used or [details.model_used]
+    sources = dict.fromkeys(
+        details.model_sources.get(model, (model, "credential type unavailable")) for model in models
+    )
+    labels = ", ".join(f"{_markdown_code_span(model)} ({credential})" for model, credential in sources)
+    return f"\n\n**Reviewed with** {labels}\n"
+
 _REVIEW_FAILURE_REASONS = (
     (
         ("credit balance is too low", "insufficient credits", "insufficient balance", "insufficient_quota"),
@@ -1388,6 +1400,8 @@ class PRReviewer:
         # Output the agent run details (model, tokens, time cost) if enabled
         if get_settings().get('config', {}).get('output_run_details', False):
             markdown_text += show_run_details(self.git_provider.is_supported("gfm_markdown"))
+
+        markdown_text += _review_model_footer()
 
         if self._review_state_result is not None:
             state_result = self._review_state_result

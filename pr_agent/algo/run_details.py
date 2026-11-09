@@ -33,6 +33,8 @@ class RunDetails:
     model_used: Optional[str] = None
     # Retain every model contributing to a merged review; keep scalar output for other tools.
     models_used: list[str] = field(default_factory=list)
+    # Map the requested model to the model reported by the backend and its credential type.
+    model_sources: dict[str, tuple[str, str]] = field(default_factory=dict)
     # Sticky: once a fallback has won, a later success on the primary model must not
     # clear this, or the comment would hide that a fallback ran at all.
     fallback_used: bool = False
@@ -129,6 +131,12 @@ def record_model_used(model: str, is_fallback: bool) -> None:
     if is_fallback:
         # sticky: later primary success must not hide that a fallback ran
         details.fallback_used = True
+
+
+def record_model_source(requested_model: str, model: str, credential_type: str) -> None:
+    details = get_run_details()
+    if details is not None:
+        details.model_sources[requested_model] = (model, credential_type)
 
 
 def _read_token_field(usage, name: str) -> int:

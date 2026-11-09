@@ -69,6 +69,8 @@ commands run when the author opens their PR, subject to the existing repository,
 Other configured PR actions can use the token when the author also triggered the event. PR-Agent uses the
 configured OpenAI fallback if a token is missing or Claude Code cannot complete the request. Manual, push,
 and submitted-review commands use the regular backend and its configured model chain.
+The **Reviewed with** line in the review identifies the model and whether it used a Claude Code setup token
+or an OpenAI API key.
 
 #### Enable the internal token screen
 

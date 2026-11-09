@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
+from pr_agent.algo.run_details import record_ai_call, record_model_source
 from pr_agent.algo.token_budget import FallbackEligibleError
 from pr_agent.config_loader import get_settings
 
@@ -31,6 +32,8 @@ class ClaudeCodeAIHandler(LiteLLMAIHandler):
             raise FallbackEligibleError("Claude Code could not complete the request.") from error
         if finish_reason == "length":
             raise FallbackEligibleError("Claude Code output was truncated.")
+        record_ai_call()
+        record_model_source(model, claude_model, "Claude Code setup token")
         return result, finish_reason
 
 

@@ -139,7 +139,7 @@ from pr_agent.algo.ai_handlers.litellm_helpers import (
     get_repetition_penalty,
 )
 from pr_agent.algo.prompt_fragments import render_skills_prefix
-from pr_agent.algo.run_details import _as_decimal_cost, record_ai_call
+from pr_agent.algo.run_details import _as_decimal_cost, record_ai_call, record_model_source
 from pr_agent.algo.run_output import get_version
 from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.url_safety import with_safe_redirects
@@ -3280,6 +3280,10 @@ class LiteLLMAIHandler(BaseAiHandler):
             get_logger().info(f"\nAI response:\n{resp}")
 
         self._record_completion_metadata(response_obj, model=model, display_model=user_model)
+        if request_provider == "openai" and kwargs.get("api_key") not in (None, "", DUMMY_LITELLM_API_KEY):
+            response_model = _response_field(response_obj, "model")
+            reported_model = response_model.strip() if isinstance(response_model, str) else ""
+            record_model_source(user_model, reported_model or user_model, "OpenAI API key")
 
         return resp, finish_reason
 

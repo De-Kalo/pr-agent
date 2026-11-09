@@ -8,7 +8,8 @@ import pytest
 
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.algo.ai_handlers.litellm_helpers import MockResponse
-from pr_agent.algo.run_details import get_run_details, init_run_details
+from pr_agent.algo.run_details import get_run_details, init_run_details, record_model_used
+from pr_agent.tools.pr_reviewer import _review_model_footer
 
 
 class _Usage:
@@ -359,6 +360,19 @@ async def test_chat_completion_records_the_call_it_just_made(monkeypatch):
     assert details.prompt_tokens == 100
     assert details.completion_tokens == 10
     assert details.total_tokens == 110
+
+
+async def test_review_footer_uses_the_openai_response_model_and_credential_type(monkeypatch):
+    handler = _bare_handler()
+    handler._provider_environment_api_keys = {"openai": "test-api-key"}
+    response = MockResponse("review", "stop", model="gpt-4.1-2025-04-14")
+    monkeypatch.setattr(handler, "_get_completion", AsyncMock(return_value=("review", "stop", response)))
+
+    init_run_details()
+    await handler.chat_completion(model="gpt-4.1", system="sys", user="usr")
+    record_model_used("gpt-4.1", is_fallback=True)
+
+    assert _review_model_footer() == "\n\n**Reviewed with** `gpt-4.1-2025-04-14` (OpenAI API key)\n"
 
 
 @pytest.mark.asyncio
