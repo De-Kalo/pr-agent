@@ -174,6 +174,34 @@ def test_plan_token_refreshes_before_expiry(monkeypatch):
     assert (stored["refresh_token"], stored["expires_at"]) == ("refresh-2", 90_000)
 
 
+@pytest.mark.parametrize("change", ["disconnected", "replaced"])
+def test_plan_refresh_does_not_overwrite_a_change_made_during_refresh(monkeypatch, change):
+    name = "pr-agent/chatgpt-plan/7/42"
+    replacement = _plan_record(80_000, "refresh-new")
+    records = {name: _plan_record(2000)}
+
+    class Store:
+        def get_secret(self, secret_name):
+            return records.get(secret_name, "")
+
+        def store_secret(self, secret_name, value):
+            raise AssertionError("The refresh must not overwrite a newer member change.")
+
+    def refresh(url, json, **kwargs):
+        records[name] = "{}" if change == "disconnected" else replacement
+        return httpx.Response(200, json={"access_token": _access_token(90_000), "refresh_token": "refresh-2"},
+                              request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(portal, "_token_store", Store)
+    monkeypatch.setattr(portal.time, "time", lambda: 1000)
+    monkeypatch.setattr(portal.httpx, "post", refresh)
+    plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
+    if change == "disconnected":
+        assert plan is None
+    else:
+        assert plan.access_token == _access_token(80_000)
+
+
 @pytest.mark.parametrize("other_worker_refreshed", [True, False])
 def test_failed_plan_refresh_uses_another_workers_record(monkeypatch, other_worker_refreshed):
     reads = [_plan_record(1010), _plan_record(90_000, "refresh-2") if other_worker_refreshed else _plan_record(1010)]

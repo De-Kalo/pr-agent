@@ -179,8 +179,17 @@ def get_registered_chatgpt_plan_credentials(installation_id: int, user_id: int) 
             if record is None or record["expires_at"] <= time.time() + 30:
                 return None
         else:
-            store.store_secret(name, json.dumps(refreshed))
-            record = refreshed
+            # Re-read before writing, so a refresh never overwrites a disconnect or a newly pasted login.
+            current = _load_chatgpt_record(store, name)
+            if current is None:
+                return None
+            if current["refresh_token"] != record["refresh_token"]:
+                record = current
+                if record["expires_at"] <= time.time() + 30:
+                    return None
+            else:
+                store.store_secret(name, json.dumps(refreshed))
+                record = refreshed
     return ChatGPTPlanCredentials(record["access_token"], record["account_id"])
 
 
