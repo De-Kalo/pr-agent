@@ -1,7 +1,9 @@
+import asyncio
 import copy
 import os
 import time
 import uuid
+from functools import partial
 from typing import Any, Dict, Tuple
 
 import uvicorn
@@ -13,6 +15,8 @@ from starlette_context.middleware import RawContextMiddleware
 
 from pr_agent.agent.pr_agent import PRAgent, prepare_command
 from pr_agent.agent.request_policy import RequestOutcome
+from pr_agent.algo.ai_handlers.claude_code import ClaudeCodeAIHandler
+from pr_agent.algo.pr_processing import prefer_model
 from pr_agent.algo.run_details import command_failed, init_run_details
 from pr_agent.config_loader import get_settings, global_settings
 from pr_agent.git_providers import get_git_provider, get_git_provider_with_context
@@ -20,6 +24,7 @@ from pr_agent.git_providers.utils import apply_repo_settings
 from pr_agent.identity_providers import get_identity_provider
 from pr_agent.identity_providers.identity_provider import Eligibility
 from pr_agent.log import LoggingFormat, get_logger, setup_logger
+from pr_agent.servers import claude_token_portal
 from pr_agent.servers.github_common import (
     _normalise_setting_list,
     _reformat_quote_ask_command,
@@ -474,6 +479,28 @@ def _check_pull_request_event(action: str, body: dict, log_context: dict) -> Tup
     return pull_request, api_url
 
 
+async def _pr_author_claude_token(body: dict) -> str:
+    author = body.get("pull_request", {}).get("user") or {}
+    author_id = author.get("id")
+    installation_id = (body.get("installation") or {}).get("id")
+    sender_id = (body.get("sender") or {}).get("id")
+    if (
+        type(author_id) is not int or author_id <= 0 or author_id != sender_id
+        or type(installation_id) is not int or installation_id <= 0
+        or author.get("type") != "User"
+    ):
+        return ""
+    if not global_settings.get("github_app.claude_token_org"):
+        return os.environ.get(f"PR_AGENT_CLAUDE_TOKEN_{installation_id}_{author_id}", "").strip()
+    if installation_id != global_settings.get("github_app.claude_token_installation_id"):
+        return ""
+    try:
+        return await asyncio.to_thread(claude_token_portal.get_registered_token, installation_id, author_id)
+    except Exception:
+        get_logger().warning("Could not load the registered Claude Code token. Continuing with model fallback.")
+        return ""
+
+
 async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body: dict, api_url: str,
                                         log_context: dict):
     feedback_on_draft = get_settings().github_app.feedback_on_draft_pr
@@ -498,6 +525,12 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     if not commands:
         get_logger().info(f"No {commands_conf} configured, skipping auto commands")
         return
+    preferred_model = None
+    if commands_conf == "pr_commands" and global_settings.get("github_app.author_claude_tokens", False):
+        token = await _pr_author_claude_token(body)
+        if token:
+            preferred_model = global_settings.get("github_app.author_claude_model")
+            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=token))
     get_settings().set("config.is_auto_command", True)
     provider = _check_run_provider(api_url)
     try:
@@ -521,7 +554,8 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
             # Install a fresh collector so `command_failed()` below cannot read a verdict left
             # behind by the previous command; the tool replaces it with its own on entry.
             init_run_details()
-            result = await agent.handle_request(api_url, new_command, notify=notify_start)
+            with prefer_model(preferred_model):
+                result = await agent.handle_request(api_url, new_command, notify=notify_start)
             if result is RequestOutcome.SKIPPED:
                 return RequestOutcome.SKIPPED
             if result is False:
@@ -554,6 +588,7 @@ if prometheus_metrics_enabled():
     attach_metrics_endpoint(router)
 app = create_server_app(middleware=middleware)
 app.include_router(router)
+app.include_router(claude_token_portal.router)
 
 
 def start():

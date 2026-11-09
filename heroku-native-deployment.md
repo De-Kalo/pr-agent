@@ -49,6 +49,60 @@ UV_PROJECT_ENVIRONMENT=/tmp/hk uv sync --locked --no-default-groups
 /tmp/hk/bin/python -c 'import pr_agent.git_providers as g; print(g._GIT_PROVIDERS["github"])'
 ```
 
+### Use each PR author's Claude subscription
+
+This setup is for an internal, self-hosted GitHub App whose authors opt in with their own Claude subscriptions.
+Make the official Claude Code CLI available as `claude` on the dyno's PATH. The Python buildpack alone does not
+install it. Use a release with `--safe-mode` support, such as 2.1.319 or newer.
+
+Set these deployment config vars. Keep the existing OpenAI credentials and model configuration. The author's
+Claude model is tried first, then PR-Agent uses its regular model chain.
+
+| Config var | Example value |
+| --- | --- |
+| `GITHUB_APP__AUTHOR_CLAUDE_TOKENS` | `true` |
+| `GITHUB_APP__AUTHOR_CLAUDE_MODEL` | `claude-sonnet-4-6` |
+| `GITHUB_APP__PR_COMMANDS` | `["/review"]` |
+
+The GitHub App must subscribe to Pull request events and have a configured webhook secret. The automatic
+commands run when the author opens their PR, subject to the existing repository, draft, and action filters.
+Other configured PR actions can use the token when the author also triggered the event. PR-Agent uses the
+configured OpenAI fallback if a token is missing or Claude Code cannot complete the request. Manual, push,
+and submitted-review commands use the regular backend and its configured model chain.
+
+#### Enable the internal token screen
+
+1. In the GitHub App settings, add `https://<app-host>/claude-token/callback` as a user authorization callback
+   URL. Grant the app **Members: Read-only** organization permission and approve the updated permissions on
+   the installation.
+2. Include `boto3` in the deployment image using the existing `codecommit` extra
+   (`uv sync --locked --extra codecommit`). The stock Heroku Python buildpack skips extras. Give the app AWS
+   credentials with `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, and
+   `secretsmanager:CreateSecret` scoped to `pr-agent/claude-code/<installation_id>/*`.
+3. Configure the screen with these deployment settings.
+
+   | Config var | Value |
+   | --- | --- |
+   | `GITHUB_APP__CLAUDE_TOKEN_ORG` | Your GitHub organization login |
+   | `GITHUB_APP__CLAUDE_TOKEN_INSTALLATION_ID` | The organization's numeric GitHub App installation ID |
+   | `GITHUB_APP__CLAUDE_TOKEN_CALLBACK_URL` | The HTTPS callback URL from step 1 |
+   | `GITHUB_APP__CLAUDE_TOKEN_CLIENT_ID` | The GitHub App's Client ID |
+   | `GITHUB_APP__CLAUDE_TOKEN_CLIENT_SECRET` | The GitHub App's Client secret |
+   | `GITHUB_APP__CLAUDE_TOKEN_SESSION_SECRET` | A dedicated random secret, generated with `openssl rand -hex 32` |
+   | `AWS_SECRETS_MANAGER__REGION_NAME` | The AWS region that stores the tokens |
+
+Members visit `https://<app-host>/claude-token`, sign in to GitHub, and paste the token they generated with
+`claude setup-token`. The app verifies active membership and stores the token under that member's numeric
+GitHub ID. Members can replace or remove it from the same screen. Removing it clears the current stored value.
+AWS Secrets Manager can retain older versions, so revoke the token in Claude when you want to invalidate it.
+
+With the screen enabled, the app reads tokens only from AWS Secrets Manager for the configured installation.
+Authors with existing `PR_AGENT_CLAUDE_TOKEN_<installation_id>_<user_id>` config vars need to register through
+the screen. Administrators can remove those config vars after migration. Deployments without the screen can
+still provision tokens using the config vars.
+
+[Claude Code setup-token documentation](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)
+
 ### 3. Deploy to Heroku
 
 ```bash

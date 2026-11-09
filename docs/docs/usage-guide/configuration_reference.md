@@ -364,6 +364,11 @@ _This section only documents commented-out examples; see the [TOML source](https
 | --- | --- | --- |
 | `handle_pr_actions` | ["opened", "reopened", "ready_for_review"] |  |
 | `feedback_on_draft_pr` | false |  |
+| `author_claude_tokens` | false | Deployment-only opt-in to per-author Claude Code setup tokens for automatic PR commands. |
+| `author_claude_model` | "claude-sonnet-4-6" | Try this model before the regular model chain for registered authors. |
+| `claude_token_org` | "" | Configure these deployment settings to enable internal self-service token registration. |
+| `claude_token_installation_id` | 0 |  |
+| `claude_token_callback_url` | "" |  |
 | `review_states` | ["changes_requested"] | A submitted GitHub review can optionally trigger these commands. The empty default preserves current behavior. |
 | `review_author_types` | ["User"] |  |
 | `review_commands` | [] |  |

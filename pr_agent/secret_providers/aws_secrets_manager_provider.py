@@ -21,17 +21,17 @@ def _error_kind(error: Exception) -> str:
 
 
 class AWSSecretsManagerProvider(SecretProvider):
-    def __init__(self):
+    def __init__(self, *, settings=None, require_config_secret: bool = True):
         try:
-            region_name = get_settings().get("aws_secrets_manager.region_name") or \
-                         get_settings().get("aws.AWS_REGION_NAME")
+            settings = get_settings() if settings is None else settings
+            region_name = settings.get("aws_secrets_manager.region_name") or settings.get("aws.AWS_REGION_NAME")
             if region_name:
                 self.client = boto3.client('secretsmanager', region_name=region_name)
             else:
                 self.client = boto3.client('secretsmanager')
 
-            self.secret_arn = get_settings().get("aws_secrets_manager.secret_arn")
-            if not self.secret_arn:
+            self.secret_arn = settings.get("aws_secrets_manager.secret_arn")
+            if require_config_secret and not self.secret_arn:
                 raise ValueError("AWS Secrets Manager ARN is not configured")
         except Exception as e:
             # Avoid logging SDK error text, which can include credential-process output.

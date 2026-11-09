@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Callable, List, Tuple
@@ -41,6 +42,17 @@ MAX_EXTRA_LINES = 10
 _effective_fallback_chain: ContextVar[tuple[tuple[str, str | None], ...] | None] = ContextVar(
     "pr_agent_effective_fallback_chain", default=None
 )
+_preferred_model: ContextVar[str | None] = ContextVar("pr_agent_preferred_model", default=None)
+
+
+@contextmanager
+def prefer_model(model: str | None):
+    """Try a request-specific model before the regular model chain."""
+    token = _preferred_model.set(model)
+    try:
+        yield
+    finally:
+        _preferred_model.reset(token)
 
 
 def get_effective_fallback_chain() -> tuple[tuple[str, str | None], ...] | None:
@@ -838,6 +850,9 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
     # Ignore surplus deployment entries when fewer fallback models are configured; this matches
     # the existing retry loop, which stops as soon as the first successful model returns.
     effective_chain = tuple(zip(all_models, all_deployments[:len(all_models)], strict=True))
+    preferred = _preferred_model.get()
+    if preferred:
+        effective_chain = ((preferred, None), *(entry for entry in effective_chain if entry[0] != preferred))
     original_deployment_id = get_settings().get("openai.deployment_id", None)
     context_token = _effective_fallback_chain.set(effective_chain)
     attempt_errors = []
@@ -859,9 +874,9 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
                     f"Failed to generate prediction with {model}",
                     artifact={"error": e},
                 )
-                if i == len(all_models) - 1:  # If it's the last iteration
+                if i == len(effective_chain) - 1:
                     raise Exception(
-                        f"Failed to generate prediction with any model of {all_models}. "
+                        f"Failed to generate prediction with any model of {[model for model, _ in effective_chain]}. "
                         f"Attempts: {'; '.join(attempt_errors)}"
                     ) from e
             else:
