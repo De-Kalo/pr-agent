@@ -81,6 +81,18 @@ def get_registered_token(installation_id: int, user_id: int) -> str:
     return token if isinstance(token, str) else ""
 
 
+def get_registered_chatgpt_plan_token(installation_id: int, user_id: int) -> str:
+    raw = _token_store().get_secret(f"pr-agent/chatgpt-plan/{installation_id}/{user_id}")
+    if not raw:
+        return ""
+    credentials = json.loads(raw)
+    expires_at = credentials.get("expires_at")
+    token = credentials.get("access_token")
+    if type(expires_at) is int and expires_at > time.time() + 30 and isinstance(token, str):
+        return token.strip()
+    return ""
+
+
 def _save_registered_token(installation_id: int, user_id: int, token: str) -> None:
     _token_store().store_secret(_secret_name(installation_id, user_id), json.dumps({"token": token}))
 

@@ -72,6 +72,13 @@ and submitted-review commands use the regular backend and its configured model c
 The **Reviewed with** line in the review identifies the model and whether it used a Claude Code setup token
 or an OpenAI API key.
 
+The ChatGPT plan review path is disabled by default. After hosted access and account onboarding are ready,
+`GITHUB_APP__AUTHOR_CHATGPT_PLAN_MODEL` selects the approved model. The reviewer reads a current OAuth access
+token from `pr-agent/chatgpt-plan/<installation_id>/<user_id>` as JSON with `access_token` and a Unix timestamp
+in `expires_at`. The runtime identity needs read access to that prefix. OAuth onboarding and refresh must supply
+these records. With a valid record, reviews try ChatGPT plan usage, then Claude Code if registered, then the
+regular model chain. The footer identifies successful plan reviews as **ChatGPT plan token**.
+
 #### Enable the internal token screen
 
 1. In the GitHub App settings, add `https://<app-host>/claude-token/callback` as a user authorization callback

@@ -18,10 +18,8 @@ class ClaudeCodeAIHandler(LiteLLMAIHandler):
 
     async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
         claude_model = model.removeprefix("anthropic/")
-        if not claude_model.startswith("claude-") or "/" in claude_model:
+        if not self._token or not claude_model.startswith("claude-") or "/" in claude_model:
             return await super().chat_completion(model, system, user, temperature, img_path)
-        if not self._token:
-            raise FallbackEligibleError("No Claude Code setup token is registered for this PR author.")
         if img_path:
             raise FallbackEligibleError("The Claude Code setup-token backend supports text prompts only.")
         try:
