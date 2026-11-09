@@ -104,6 +104,7 @@ async def test_claude_cli_receives_only_the_selected_token(monkeypatch):
         assert args[args.index("--tools") + 1] == ""
         assert Path(args[args.index("--system-prompt-file") + 1]).read_text() == "system"
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "author-token"
+        assert env["MAX_THINKING_TOKENS"] == "0"
         assert "ANTHROPIC_API_KEY" not in env
         assert "PR_AGENT_CLAUDE_TOKEN_7_43" not in env
         return process

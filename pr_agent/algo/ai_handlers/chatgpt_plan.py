@@ -5,11 +5,15 @@ from pr_agent.algo.run_details import record_ai_call, record_model_source
 from pr_agent.algo.token_budget import CHATGPT_PLAN_MODEL_PREFIX, FallbackEligibleError
 from pr_agent.config_loader import get_settings
 
+# ChatGPT plan OAuth tokens are accepted by the Codex backend, not by the public API base URL.
+CHATGPT_PLAN_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
 
 class ChatGPTPlanAIHandler(ClaudeCodeAIHandler):
-    def __init__(self, *, access_token: str, token: str):
+    def __init__(self, *, access_token: str, account_id: str, token: str):
         super().__init__(token=token)
         self._plan_access_token = access_token
+        self._plan_account_id = account_id
 
     async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
         if not model.startswith(CHATGPT_PLAN_MODEL_PREFIX):
@@ -21,9 +25,10 @@ class ChatGPTPlanAIHandler(ClaudeCodeAIHandler):
         try:
             async with openai.AsyncOpenAI(
                 api_key=self._plan_access_token,
-                base_url="https://api.openai.com/v1",
+                base_url=CHATGPT_PLAN_BASE_URL,
                 organization="",
                 project="",
+                default_headers={"ChatGPT-Account-Id": self._plan_account_id, "originator": "pr_agent"},
                 timeout=get_settings().config.ai_timeout,
                 max_retries=0,
             ) as client:

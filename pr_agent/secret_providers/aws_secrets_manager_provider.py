@@ -21,6 +21,8 @@ def _error_kind(error: Exception) -> str:
 
 
 class AWSSecretsManagerProvider(SecretProvider):
+    _CANDIDATE_STAGE = "PR_AGENT_CANDIDATE"
+
     def __init__(self, *, settings=None, require_config_secret: bool = True):
         try:
             settings = get_settings() if settings is None else settings
@@ -51,6 +53,39 @@ class AWSSecretsManagerProvider(SecretProvider):
             if _error_kind(e) != "ResourceNotFoundException":
                 raise
             return ""
+
+    def get_secret_version(self, secret_name: str) -> tuple[str, str]:
+        """Return the current value and version ID, or empty strings when the secret does not exist."""
+        try:
+            response = self.client.get_secret_value(SecretId=secret_name)
+        except Exception as e:
+            get_logger().warning(f"Failed to get secret from AWS Secrets Manager: {_error_kind(e)}")
+            if _error_kind(e) != "ResourceNotFoundException":
+                raise
+            return "", ""
+        return response['SecretString'], response['VersionId']
+
+    def replace_secret_if_current(self, secret_name: str, secret_value: str, current_version_id: str) -> bool:
+        """
+        Make secret_value current only if current_version_id is still current.
+        Moving AWSCURRENT with RemoveFromVersionId is checked atomically by Secrets Manager.
+        """
+        version_id = self.client.put_secret_value(
+            SecretId=secret_name, SecretString=secret_value, VersionStages=[self._CANDIDATE_STAGE]
+        )['VersionId']
+        try:
+            self.client.update_secret_version_stage(
+                SecretId=secret_name,
+                VersionStage="AWSCURRENT",
+                MoveToVersionId=version_id,
+                RemoveFromVersionId=current_version_id,
+            )
+        except ClientError as e:
+            if _error_kind(e) == "InvalidParameterException":
+                return False
+            get_logger().error(f"Failed to update secret in AWS Secrets Manager: {_error_kind(e)}")
+            raise
+        return True
 
     def get_all_secrets(self) -> dict:
         """

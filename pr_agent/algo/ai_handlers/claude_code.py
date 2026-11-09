@@ -41,6 +41,8 @@ async def _claude_code_completion(
     # Give the CLI its own working directory and only the environment needed to run.
     env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "LC_ALL") if key in os.environ}
     env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    # Claude Code thinks by default; a full review then needs several minutes and exceeds ai_timeout.
+    env["MAX_THINKING_TOKENS"] = "0"
 
     with TemporaryDirectory(prefix="pr-agent-claude-") as directory:
         env["CLAUDE_CONFIG_DIR"] = str(Path(directory) / "config")

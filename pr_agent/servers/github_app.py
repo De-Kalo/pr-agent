@@ -511,15 +511,15 @@ async def _pr_author_claude_token(body: dict) -> str:
         return ""
 
 
-async def _pr_author_chatgpt_plan_token(body: dict) -> str:
+async def _pr_author_chatgpt_plan_credentials(body: dict) -> claude_token_portal.ChatGPTPlanCredentials | None:
     identity = _pr_author_identity(body)
     if not identity or identity[0] != global_settings.get("github_app.claude_token_installation_id"):
-        return ""
+        return None
     try:
-        return await asyncio.to_thread(claude_token_portal.get_registered_chatgpt_plan_token, *identity)
+        return await asyncio.to_thread(claude_token_portal.get_registered_chatgpt_plan_credentials, *identity)
     except Exception:
         get_logger().warning("Could not load the author's ChatGPT plan token. Continuing with model fallback.")
-        return ""
+        return None
 
 
 async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body: dict, api_url: str,
@@ -556,10 +556,12 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     if commands_conf == "pr_commands":
         configured_plan_model = global_settings.get("github_app.author_chatgpt_plan_model")
         if configured_plan_model:
-            plan_token = await _pr_author_chatgpt_plan_token(body)
-            if plan_token:
+            plan = await _pr_author_chatgpt_plan_credentials(body)
+            if plan:
                 plan_model = f"{CHATGPT_PLAN_MODEL_PREFIX}{configured_plan_model}"
-                agent = PRAgent(ai_handler=partial(ChatGPTPlanAIHandler, access_token=plan_token, token=claude_token))
+                agent = PRAgent(ai_handler=partial(
+                    ChatGPTPlanAIHandler, access_token=plan.access_token, account_id=plan.account_id, token=claude_token
+                ))
     get_settings().set("config.is_auto_command", True)
     provider = _check_run_provider(api_url)
     try:
