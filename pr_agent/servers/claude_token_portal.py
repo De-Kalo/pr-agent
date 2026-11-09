@@ -229,7 +229,7 @@ def _member_setup(installation_id: int, user_id: int) -> tuple[bool, bool]:
 
 
 def _review_order(setup: tuple[bool, bool] | None, signed_in: bool) -> str:
-    """Describe the order in which an automatic review tries each model source."""
+    """Describe the order in which the author's reviews try each model source."""
 
     def status(ready: bool | None, ready_text: str, missing_text: str) -> str:
         if not signed_in:
@@ -261,11 +261,12 @@ def _review_order(setup: tuple[bool, bool] | None, signed_in: bool) -> str:
     )
     return f"""
 <section class="order"><h2>How your PR reviews run</h2>
-<p>When you open a PR, its automatic review tries these in order and uses the first one that works:</p>
+<p>When you open a PR, or comment a command such as <code>/review</code> on your own PR, PR-Agent tries
+these in order and uses the first one that works:</p>
 <ol>{"".join(steps)}</ol>
 <p>A step is skipped when it isn't set up, has reached its usage limit, or fails. The <strong>Reviewed with</strong>
-line at the bottom of each review shows which one ran. Reviews you request with a <code>/review</code> comment
-use the OpenAI API.</p></section>"""
+line at the bottom of each review shows which one ran. Commands that someone else comments on your PR, and
+reviews after new pushes, use the OpenAI API.</p></section>"""
 
 
 @router.get(_PATH, response_class=HTMLResponse)

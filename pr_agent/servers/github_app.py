@@ -167,11 +167,13 @@ async def handle_comments_on_pr(body: Dict[str, Any],
     with get_logger().contextualize(**log_context):
         if get_identity_provider().verify_eligibility("github", sender_id, api_url) is not Eligibility.NOT_ELIGIBLE:
             get_logger().info(f"Processing comment on PR {api_url=}, comment_body={comment_body}")
-            succeeded = await agent.handle_request(
-                api_url, comment_body,
-                notify=lambda: provider.add_eyes_reaction(comment_id, disable_eyes=disable_eyes),
-                # Preserve compatibility mode while exposing failures to outcome reactions.
-                propagate_tool_errors=True)
+            agent, preferred_models = await _pr_author_backend(body, agent)
+            with prefer_model(*preferred_models):
+                succeeded = await agent.handle_request(
+                    api_url, comment_body,
+                    notify=lambda: provider.add_eyes_reaction(comment_id, disable_eyes=disable_eyes),
+                    # Preserve compatibility mode while exposing failures to outcome reactions.
+                    propagate_tool_errors=True)
             # Optional, and disabled by default: tell the author how the command ended without
             # adding another comment to the thread.
             if succeeded is RequestOutcome.SKIPPED:
@@ -482,7 +484,9 @@ def _check_pull_request_event(action: str, body: dict, log_context: dict) -> Tup
 
 
 def _pr_author_identity(body: dict) -> tuple[int, int] | None:
-    author = body.get("pull_request", {}).get("user") or {}
+    """Return the PR author's identity only when the author also triggered the event."""
+    # Pull request events carry the PR; comments on its conversation tab carry it as an issue.
+    author = (body.get("pull_request") or body.get("issue") or {}).get("user") or {}
     author_id = author.get("id")
     installation_id = (body.get("installation") or {}).get("id")
     sender_id = (body.get("sender") or {}).get("id")
@@ -522,6 +526,29 @@ async def _pr_author_chatgpt_plan_credentials(body: dict) -> claude_token_portal
         return None
 
 
+async def _pr_author_backend(body: dict, agent: PRAgent) -> tuple[PRAgent, tuple[str, ...]]:
+    """
+    Use the PR author's own ChatGPT plan, then Claude Code, before the regular model chain.
+    Applies only when the author triggered the event, so nobody can spend another member's plan.
+    """
+    claude_model = plan_model = None
+    claude_token = ""
+    if global_settings.get("github_app.author_claude_tokens", False):
+        claude_token = await _pr_author_claude_token(body)
+        if claude_token:
+            claude_model = global_settings.get("github_app.author_claude_model")
+            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=claude_token))
+    configured_plan_model = global_settings.get("github_app.author_chatgpt_plan_model")
+    if configured_plan_model:
+        plan = await _pr_author_chatgpt_plan_credentials(body)
+        if plan:
+            plan_model = f"{CHATGPT_PLAN_MODEL_PREFIX}{configured_plan_model}"
+            agent = PRAgent(ai_handler=partial(
+                ChatGPTPlanAIHandler, access_token=plan.access_token, account_id=plan.account_id, token=claude_token
+            ))
+    return agent, tuple(model for model in (plan_model, claude_model) if model)
+
+
 async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body: dict, api_url: str,
                                         log_context: dict):
     feedback_on_draft = get_settings().github_app.feedback_on_draft_pr
@@ -546,22 +573,9 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     if not commands:
         get_logger().info(f"No {commands_conf} configured, skipping auto commands")
         return
-    claude_model = plan_model = None
-    claude_token = ""
-    if commands_conf == "pr_commands" and global_settings.get("github_app.author_claude_tokens", False):
-        claude_token = await _pr_author_claude_token(body)
-        if claude_token:
-            claude_model = global_settings.get("github_app.author_claude_model")
-            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=claude_token))
+    preferred_models = ()
     if commands_conf == "pr_commands":
-        configured_plan_model = global_settings.get("github_app.author_chatgpt_plan_model")
-        if configured_plan_model:
-            plan = await _pr_author_chatgpt_plan_credentials(body)
-            if plan:
-                plan_model = f"{CHATGPT_PLAN_MODEL_PREFIX}{configured_plan_model}"
-                agent = PRAgent(ai_handler=partial(
-                    ChatGPTPlanAIHandler, access_token=plan.access_token, account_id=plan.account_id, token=claude_token
-                ))
+        agent, preferred_models = await _pr_author_backend(body, agent)
     get_settings().set("config.is_auto_command", True)
     provider = _check_run_provider(api_url)
     try:
@@ -585,7 +599,7 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
             # Install a fresh collector so `command_failed()` below cannot read a verdict left
             # behind by the previous command; the tool replaces it with its own on entry.
             init_run_details()
-            with prefer_model(plan_model, claude_model):
+            with prefer_model(*preferred_models):
                 result = await agent.handle_request(api_url, new_command, notify=notify_start)
             if result is RequestOutcome.SKIPPED:
                 return RequestOutcome.SKIPPED

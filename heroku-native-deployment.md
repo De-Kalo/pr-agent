@@ -66,9 +66,10 @@ Claude model is tried first, then PR-Agent uses its regular model chain.
 
 The GitHub App must subscribe to Pull request events and have a configured webhook secret. The automatic
 commands run when the author opens their PR, subject to the existing repository, draft, and action filters.
-Other configured PR actions can use the token when the author also triggered the event. PR-Agent uses the
-configured OpenAI fallback if a token is missing or Claude Code cannot complete the request. Manual, push,
-and submitted-review commands use the regular backend and its configured model chain.
+Other configured PR actions can use the token when the author also triggered the event. Commands the author
+comments on their own PR, such as `/review`, use the same order. PR-Agent uses the configured OpenAI fallback if
+a token is missing or Claude Code cannot complete the request. Commands that other people comment, push, and
+submitted-review commands use the regular backend and its configured model chain.
 The **Reviewed with** line in the review identifies the model and whether it used a Claude Code setup token
 or an OpenAI API key.
 
