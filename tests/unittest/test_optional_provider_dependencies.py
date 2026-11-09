@@ -29,7 +29,7 @@ def _project_metadata():
         return tomllib.load(f)["project"]
 
 
-def test_provider_sdks_are_not_base_dependencies_and_all_is_complete():
+def test_provider_sdks_remain_optional_except_for_heroku_github_and_all_is_complete():
     project = _project_metadata()
     base_dependencies = set(project["dependencies"])
     extras = project["optional-dependencies"]
@@ -40,7 +40,8 @@ def test_provider_sdks_are_not_base_dependencies_and_all_is_complete():
         for requirement in extras[extra]
     }
 
-    assert base_dependencies.isdisjoint(integration_requirements)
+    # The fork keeps PyGithub in the base install for its Heroku GitHub App.
+    assert base_dependencies & integration_requirements == set(extras["github"])
     assert extras["all"] == [f"pr-agent[{','.join(INTEGRATION_EXTRAS)}]"]
 
 
