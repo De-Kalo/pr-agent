@@ -256,10 +256,19 @@ def test_portal_connects_chatgpt_from_codex_auth(portal_settings, monkeypatch):
     assert access_token not in saved.text
     plan = portal.get_registered_chatgpt_plan_credentials(7, 42)
     assert (plan.access_token, plan.account_id) == (access_token, "account-1")
+    page = client.get("/claude-token").text
+    order = [page.index(step) for step in ("ChatGPT plan</strong>", "Claude Code</strong>", "OpenAI API</strong>")]
+    assert order == sorted(order)
+    assert "✓ ChatGPT connected" in page
+    assert "✗ No Claude token. Skipped for your PRs." in page
+    assert "<code>gpt-5.6-sol</code>" in page
 
     removed = client.post("/claude-token", data={"action": "remove_chatgpt", "csrf": csrf})
     assert removed.status_code == 200
     assert portal.get_registered_chatgpt_plan_credentials(7, 42) is None
+    assert "✗ ChatGPT not connected. Skipped for your PRs." in client.get("/claude-token").text
+    signed_out = TestClient(github_app.app, base_url="https://example.test").get("/claude-token").text
+    assert "How your PR reviews run" in signed_out and "✓" not in signed_out
 
 
 def test_portal_hides_chatgpt_until_a_plan_model_is_configured(portal_settings, monkeypatch):

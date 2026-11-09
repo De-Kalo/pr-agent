@@ -116,3 +116,47 @@ async def test_claude_cli_receives_only_the_selected_token(monkeypatch):
     process.communicate.assert_awaited_once_with(b"diff")
     record_model_used("claude-sonnet-4-6", is_fallback=False)
     assert _review_model_footer() == "\n\n**Reviewed with** `claude-sonnet-4-6` (Claude Code setup token)\n"
+
+
+@pytest.mark.parametrize(("commenter_id", "uses_author_backend"), [(42, True), (43, False)])
+async def test_authors_own_comment_command_uses_their_backend(monkeypatch, commenter_id, uses_author_backend):
+    from pr_agent.algo import pr_processing
+
+    api_url = "https://api.github.com/repos/org/repo/pulls/1"
+    body = {
+        "action": "created",
+        "installation": {"id": 7},
+        "sender": {"id": commenter_id, "type": "User", "login": "commenter"},
+        "issue": {"user": {"id": 42, "type": "User"}, "pull_request": {"url": api_url}},
+        "comment": {"id": 1, "body": "/review"},
+    }
+    monkeypatch.setenv("PR_AGENT_CLAUDE_TOKEN_7_42", "author-token")
+    monkeypatch.setenv("PR_AGENT_CLAUDE_TOKEN_7_43", "commenter-token")
+    monkeypatch.setattr(github_app, "global_settings", {
+        "github_app.author_claude_tokens": True, "github_app.author_claude_model": "claude-sonnet-4-6",
+    })
+    monkeypatch.setattr(github_app, "get_git_provider_with_context", Mock())
+    preferred = []
+
+    async def handle_request(*args, **kwargs):
+        preferred.append(pr_processing._preferred_models.get())
+        return True
+
+    default_agent = Mock(handle_request=AsyncMock(side_effect=handle_request))
+    claude_agent = Mock(handle_request=AsyncMock(side_effect=handle_request))
+    factory = Mock(return_value=claude_agent)
+    monkeypatch.setattr(github_app, "PRAgent", factory)
+
+    result = await github_app.handle_comments_on_pr(
+        body, "issue_comment", "commenter", commenter_id, "created", {}, default_agent
+    )
+
+    assert result is True
+    if uses_author_backend:
+        assert factory.call_args.kwargs["ai_handler"].keywords["token"] == "author-token"
+        assert claude_agent.handle_request.await_count == 1
+        assert preferred == [("claude-sonnet-4-6",)]
+    else:
+        factory.assert_not_called()
+        assert default_agent.handle_request.await_count == 1
+        assert preferred == [()]
