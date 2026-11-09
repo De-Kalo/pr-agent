@@ -139,9 +139,13 @@ async def _handle_streaming_response(response, model=None, stream_cleanup=None):
     full_response = ""
     finish_reason = None
     finalized_usage = None
+    reported_model = model
 
     try:
         async for chunk in response:
+            chunk_model = getattr(chunk, "model", None)
+            if isinstance(chunk_model, str) and chunk_model.strip():
+                reported_model = chunk_model
             usage = _stream_usage(chunk)
             if usage is not None:
                 finalized_usage = usage
@@ -174,7 +178,7 @@ async def _handle_streaming_response(response, model=None, stream_cleanup=None):
         raise error_cls(
             f"Streaming response completed with finish_reason '{finish_reason}' but no content received",
             request=httpx.Request("POST", model or ""), body=None)
-    return full_response, finish_reason, MockResponse(full_response, finish_reason, finalized_usage, model)
+    return full_response, finish_reason, MockResponse(full_response, finish_reason, finalized_usage, reported_model)
 
 
 class MockResponse:
@@ -182,6 +186,7 @@ class MockResponse:
 
     def __init__(self, resp, finish_reason, usage=None, model=None):
         self.usage = usage
+        self.model = model
         self._data = {
             "choices": [
                 {

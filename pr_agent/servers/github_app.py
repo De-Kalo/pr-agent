@@ -15,9 +15,11 @@ from starlette_context.middleware import RawContextMiddleware
 
 from pr_agent.agent.pr_agent import PRAgent, prepare_command
 from pr_agent.agent.request_policy import RequestOutcome
+from pr_agent.algo.ai_handlers.chatgpt_plan import ChatGPTPlanAIHandler
 from pr_agent.algo.ai_handlers.claude_code import ClaudeCodeAIHandler
 from pr_agent.algo.pr_processing import prefer_model
 from pr_agent.algo.run_details import command_failed, init_run_details
+from pr_agent.algo.token_budget import CHATGPT_PLAN_MODEL_PREFIX
 from pr_agent.config_loader import get_settings, global_settings
 from pr_agent.git_providers import get_git_provider, get_git_provider_with_context
 from pr_agent.git_providers.utils import apply_repo_settings
@@ -479,7 +481,7 @@ def _check_pull_request_event(action: str, body: dict, log_context: dict) -> Tup
     return pull_request, api_url
 
 
-async def _pr_author_claude_token(body: dict) -> str:
+def _pr_author_identity(body: dict) -> tuple[int, int] | None:
     author = body.get("pull_request", {}).get("user") or {}
     author_id = author.get("id")
     installation_id = (body.get("installation") or {}).get("id")
@@ -489,7 +491,15 @@ async def _pr_author_claude_token(body: dict) -> str:
         or type(installation_id) is not int or installation_id <= 0
         or author.get("type") != "User"
     ):
+        return None
+    return installation_id, author_id
+
+
+async def _pr_author_claude_token(body: dict) -> str:
+    identity = _pr_author_identity(body)
+    if identity is None:
         return ""
+    installation_id, author_id = identity
     if not global_settings.get("github_app.claude_token_org"):
         return os.environ.get(f"PR_AGENT_CLAUDE_TOKEN_{installation_id}_{author_id}", "").strip()
     if installation_id != global_settings.get("github_app.claude_token_installation_id"):
@@ -498,6 +508,17 @@ async def _pr_author_claude_token(body: dict) -> str:
         return await asyncio.to_thread(claude_token_portal.get_registered_token, installation_id, author_id)
     except Exception:
         get_logger().warning("Could not load the registered Claude Code token. Continuing with model fallback.")
+        return ""
+
+
+async def _pr_author_chatgpt_plan_token(body: dict) -> str:
+    identity = _pr_author_identity(body)
+    if not identity or identity[0] != global_settings.get("github_app.claude_token_installation_id"):
+        return ""
+    try:
+        return await asyncio.to_thread(claude_token_portal.get_registered_chatgpt_plan_token, *identity)
+    except Exception:
+        get_logger().warning("Could not load the author's ChatGPT plan token. Continuing with model fallback.")
         return ""
 
 
@@ -525,12 +546,20 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     if not commands:
         get_logger().info(f"No {commands_conf} configured, skipping auto commands")
         return
-    preferred_model = None
+    claude_model = plan_model = None
+    claude_token = ""
     if commands_conf == "pr_commands" and global_settings.get("github_app.author_claude_tokens", False):
-        token = await _pr_author_claude_token(body)
-        if token:
-            preferred_model = global_settings.get("github_app.author_claude_model")
-            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=token))
+        claude_token = await _pr_author_claude_token(body)
+        if claude_token:
+            claude_model = global_settings.get("github_app.author_claude_model")
+            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=claude_token))
+    if commands_conf == "pr_commands":
+        configured_plan_model = global_settings.get("github_app.author_chatgpt_plan_model")
+        if configured_plan_model:
+            plan_token = await _pr_author_chatgpt_plan_token(body)
+            if plan_token:
+                plan_model = f"{CHATGPT_PLAN_MODEL_PREFIX}{configured_plan_model}"
+                agent = PRAgent(ai_handler=partial(ChatGPTPlanAIHandler, access_token=plan_token, token=claude_token))
     get_settings().set("config.is_auto_command", True)
     provider = _check_run_provider(api_url)
     try:
@@ -554,7 +583,7 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
             # Install a fresh collector so `command_failed()` below cannot read a verdict left
             # behind by the previous command; the tool replaces it with its own on entry.
             init_run_details()
-            with prefer_model(preferred_model):
+            with prefer_model(plan_model, claude_model):
                 result = await agent.handle_request(api_url, new_command, notify=notify_start)
             if result is RequestOutcome.SKIPPED:
                 return RequestOutcome.SKIPPED

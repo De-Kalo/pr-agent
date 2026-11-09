@@ -20,6 +20,7 @@ from pr_agent.log import get_logger
 MESSAGE_FRAMING_TOKEN_ALLOWANCE = 16
 REPLY_FRAMING_TOKEN_ALLOWANCE = 16
 DEFAULT_TRUNCATION_MARKER = "\n...(truncated)\n"
+CHATGPT_PLAN_MODEL_PREFIX = "chatgpt-plan/"
 
 
 class FallbackEligibleError(ValueError):
@@ -74,7 +75,7 @@ def _gpt6_budget_model(model: str, settings) -> tuple[str, bool]:
 
 def get_max_input_tokens(model: str) -> int | None:
     """Return a maintained native input ceiling independently of the total context window."""
-    model_base, native_route = _gpt6_budget_model(model, get_settings())
+    model_base, native_route = _gpt6_budget_model(model.removeprefix(CHATGPT_PLAN_MODEL_PREFIX), get_settings())
     return GPT6_MAX_INPUT_TOKENS.get(model_base) if native_route else None
 
 
@@ -94,6 +95,8 @@ def get_max_tokens(model, ignore_max_model_tokens=False):
     Pass ignore_max_model_tokens=True to keep the unreduced value, for sites that deliberately use the
     raw model context size rather than the conservative clamp.
     """
+    if isinstance(model, str):
+        model = model.removeprefix(CHATGPT_PLAN_MODEL_PREFIX)
     settings = get_settings()
     custom_max_tokens = _as_int(settings.config.custom_model_max_tokens)
     model_base, native_gpt6_route = _gpt6_budget_model(model, settings)

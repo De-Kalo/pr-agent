@@ -104,3 +104,26 @@ async def test_webhook_loads_only_the_portal_installations_token(portal_settings
     assert await github_app._pr_author_claude_token(body) == "token-7-42"
     body["installation"]["id"] = 8
     assert await github_app._pr_author_claude_token(body) == ""
+
+
+async def test_webhook_loads_only_a_current_plan_token_for_the_pr_author(portal_settings, monkeypatch):
+    expires_at = 2000
+
+    class TokenStore:
+        def get_secret(self, name):
+            assert name == "pr-agent/chatgpt-plan/7/42"
+            return f'{{"access_token": "plan-token", "expires_at": {expires_at}}}'
+
+    monkeypatch.setattr(portal, "_token_store", TokenStore)
+    monkeypatch.setattr(portal.time, "time", lambda: 1000)
+    body = {
+        "installation": {"id": 7},
+        "sender": {"id": 42},
+        "pull_request": {"user": {"id": 42, "type": "User"}},
+    }
+    assert await github_app._pr_author_chatgpt_plan_token(body) == "plan-token"
+    expires_at = 900
+    assert await github_app._pr_author_chatgpt_plan_token(body) == ""
+    expires_at = 2000
+    body["sender"]["id"] = 43
+    assert await github_app._pr_author_chatgpt_plan_token(body) == ""

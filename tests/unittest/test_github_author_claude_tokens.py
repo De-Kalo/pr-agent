@@ -7,7 +7,9 @@ from starlette_context import request_cycle_context
 
 from pr_agent.algo.ai_handlers import claude_code
 from pr_agent.algo.pr_processing import prefer_model, retry_with_fallback_models
+from pr_agent.algo.run_details import init_run_details, record_model_used
 from pr_agent.servers import github_app
+from pr_agent.tools.pr_reviewer import _review_model_footer
 
 
 @pytest.mark.parametrize(
@@ -107,6 +109,9 @@ async def test_claude_cli_receives_only_the_selected_token(monkeypatch):
         return process
 
     monkeypatch.setattr(claude_code.asyncio, "create_subprocess_exec", launch)
+    init_run_details()
     handler = claude_code.ClaudeCodeAIHandler(token="author-token")
     assert await handler.chat_completion("claude-sonnet-4-6", "system", "diff") == ("review", "stop")
     process.communicate.assert_awaited_once_with(b"diff")
+    record_model_used("claude-sonnet-4-6", is_fallback=False)
+    assert _review_model_footer() == "\n\n**Reviewed with** `claude-sonnet-4-6` (Claude Code setup token)\n"
