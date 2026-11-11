@@ -250,8 +250,14 @@ def test_portal_connects_chatgpt_from_codex_auth(portal_settings, monkeypatch):
     }})
 
     bad = client.post("/claude-token", data={"action": "save_chatgpt", "csrf": csrf, "codex_auth": "{}"})
-    assert bad.status_code == 400
-    saved = client.post("/claude-token", data={"action": "save_chatgpt", "csrf": csrf, "codex_auth": auth})
+    assert bad.status_code == 400 and "no `tokens` section" in bad.text
+    api_key = client.post("/claude-token", data={
+        "action": "save_chatgpt", "csrf": csrf, "codex_auth": '{"OPENAI_API_KEY": "sk-test", "tokens": null}',
+    })
+    assert api_key.status_code == 400 and "API-key login" in api_key.text
+    # A terminal copy wraps long tokens across lines; the newlines are not part of the token.
+    wrapped = auth.replace(access_token, access_token[:40] + "\n" + access_token[40:])
+    saved = client.post("/claude-token", data={"action": "save_chatgpt", "csrf": csrf, "codex_auth": wrapped})
     assert saved.status_code == 200
     assert access_token not in saved.text
     plan = portal.get_registered_chatgpt_plan_credentials(7, 42)

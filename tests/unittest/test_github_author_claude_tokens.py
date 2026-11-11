@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -8,6 +9,7 @@ from starlette_context import request_cycle_context
 from pr_agent.algo.ai_handlers import claude_code
 from pr_agent.algo.pr_processing import prefer_model, retry_with_fallback_models
 from pr_agent.algo.run_details import init_run_details, record_model_used
+from pr_agent.algo.token_budget import FallbackEligibleError
 from pr_agent.servers import github_app
 from pr_agent.tools.pr_reviewer import _review_model_footer
 
@@ -116,6 +118,22 @@ async def test_claude_cli_receives_only_the_selected_token(monkeypatch):
     process.communicate.assert_awaited_once_with(b"diff")
     record_model_used("claude-sonnet-4-6", is_fallback=False)
     assert _review_model_footer() == "\n\n**Reviewed with** `claude-sonnet-4-6` (Claude Code setup token)\n"
+
+
+async def test_claude_cli_error_reaches_the_fallback_message(monkeypatch):
+    process = Mock(returncode=1)
+    process.communicate = AsyncMock(return_value=(json.dumps({
+        "type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
+        "api_error": "usage_limit_reached", "result": "You've hit your individual spend limit",
+    }).encode(), None))
+
+    async def launch(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(claude_code.asyncio, "create_subprocess_exec", launch)
+    handler = claude_code.ClaudeCodeAIHandler(token="author-token")
+    with pytest.raises(FallbackEligibleError, match="429 usage_limit_reached You've hit your individual spend limit"):
+        await handler.chat_completion("claude-opus-5-5", "system", "diff")
 
 
 @pytest.mark.parametrize(("commenter_id", "uses_author_backend"), [(42, True), (43, False)])

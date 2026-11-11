@@ -113,19 +113,27 @@ def _chatgpt_record(access_token: str, refresh_token: str, account_id: str) -> d
     }
 
 
-def _parse_codex_auth(raw: str) -> dict | None:
-    """Accept the auth.json written by `codex login` with a ChatGPT account."""
+def _parse_codex_auth(raw: str) -> dict:
+    """Accept the auth.json written by `codex login` with a ChatGPT account; raise ValueError saying what is wrong."""
     try:
-        data = json.loads(raw)
+        # strict=False and whitespace removal accept tokens a terminal copy wrapped across lines.
+        data = json.loads(raw, strict=False)
     except ValueError:
-        return None
+        raise ValueError(
+            "That is not valid JSON. Copy the whole file with `pbcopy < ~/.codex-pr-agent/auth.json` and paste it."
+        ) from None
     tokens = data.get("tokens") if isinstance(data, dict) else None
     if not isinstance(tokens, dict):
-        return None
+        if isinstance(data, dict) and data.get("OPENAI_API_KEY"):
+            raise ValueError("This auth.json is from an API-key login. Run `codex login` and sign in with ChatGPT.")
+        raise ValueError("This JSON has no `tokens` section. Paste the auth.json written by `codex login`.")
     values = [tokens.get(key) for key in ("access_token", "refresh_token", "account_id")]
     if not all(isinstance(value, str) and value.strip() for value in values):
-        return None
-    return _chatgpt_record(*(value.strip() for value in values))
+        raise ValueError("The auth.json `tokens` section needs access_token, refresh_token and account_id.")
+    record = _chatgpt_record(*(re.sub(r"\s+", "", value) for value in values))
+    if record is None:
+        raise ValueError("The access token in auth.json is not a ChatGPT token. Run `codex login` again.")
+    return record
 
 
 def _load_chatgpt_record(store, name: str) -> tuple[dict | None, str]:
@@ -436,9 +444,12 @@ async def _update_chatgpt_plan(config: _PortalConfig, user_id: int, action: str,
         raise HTTPException(404)
     record = {}
     if action == "save_chatgpt":
-        record = _parse_codex_auth(codex_auth) if len(codex_auth) <= 32_768 else None
-        if record is None:
-            raise HTTPException(400, "Paste the auth.json written by `codex login` with a ChatGPT account.")
+        if len(codex_auth) > 32_768:
+            raise HTTPException(400, "That is too long for a Codex auth.json.")
+        try:
+            record = _parse_codex_auth(codex_auth)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
     try:
         await asyncio.to_thread(_save_chatgpt_record, config.installation_id, user_id, record)
     except Exception:

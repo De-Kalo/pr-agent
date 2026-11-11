@@ -27,7 +27,7 @@ class ClaudeCodeAIHandler(LiteLLMAIHandler):
                 claude_model, system, user, token=self._token, timeout=get_settings().config.ai_timeout
             )
         except (RuntimeError, OSError) as error:
-            raise FallbackEligibleError("Claude Code could not complete the request.") from error
+            raise FallbackEligibleError(f"Claude Code could not complete the request: {error}") from error
         if finish_reason == "length":
             raise FallbackEligibleError("Claude Code output was truncated.")
         record_ai_call()
@@ -77,13 +77,19 @@ async def _claude_code_completion(
             await process.communicate()
             raise
 
-    if process.returncode:
-        raise RuntimeError(f"Claude Code exited with status {process.returncode}. Check the setup token and CLI.")
     try:
         response = json.loads(stdout)
     except ValueError:
-        raise RuntimeError("Claude Code returned invalid JSON.") from None
-    if not isinstance(response, dict) or response.get("is_error") or response.get("subtype") != "success":
+        response = None
+    if isinstance(response, dict) and response.get("is_error"):
+        # The CLI reports API failures (usage limits, revoked tokens) in its JSON result, even on a non-zero exit.
+        details = [str(response.get(key) or "") for key in ("api_error_status", "api_error", "result")]
+        raise RuntimeError(" ".join(detail for detail in details if detail)[:500] or "Claude Code reported an error.")
+    if process.returncode:
+        raise RuntimeError(f"Claude Code exited with status {process.returncode}. Check the setup token and CLI.")
+    if not isinstance(response, dict):
+        raise RuntimeError("Claude Code returned invalid JSON.")
+    if response.get("subtype") != "success":
         raise RuntimeError("Claude Code did not complete the request successfully.")
     result = response.get("result")
     if not isinstance(result, str) or not result.strip():
