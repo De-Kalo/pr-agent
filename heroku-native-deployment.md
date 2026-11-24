@@ -93,6 +93,30 @@ ChatGPT plan, then Claude Code if registered, then the regular model chain. Plan
 Codex usage limits, and reviews fall back when those limits are reached. The footer identifies successful plan
 reviews as **ChatGPT plan token**.
 
+#### Review a bot's PR on its requester's tokens
+
+An allowlisted bot that writes code for a human (for example `dbarnacle-bots-de-kalo[bot]`, through Imparity) can
+have its PRs reviewed on that requester's own ChatGPT plan / Claude Code tokens. The bot puts this marker in the
+PR body when it creates the PR:
+
+```
+<!-- imparity-requested-by: {"githubId":123,"login":"x","task":"<id>"} -->
+```
+
+The requester's identity is used only when the PR author is in `github_app.requester_delegating_bots` and either
+the bot itself opened or readied the PR (event sender is the bot, so a human editing the body cannot redirect
+spending), or the requester named in the marker comments a command such as `/review`. A marker on any other PR,
+a malformed marker, or a commenter other than the requester changes nothing. The requester must have registered a
+token on the token screen; otherwise the regular chain runs. The footer reads **requester's ChatGPT plan token**
+(or **requester's Claude Code setup token**). Bot-opened events are processed even with `ignore_bot_pr` on, but
+only for allowlisted bots opening or readying a PR that carries a marker.
+
+| Config var | Example value |
+| --- | --- |
+| `GITHUB_APP__REQUESTER_DELEGATING_BOTS` | `["dbarnacle-bots-de-kalo[bot]"]` |
+
+The default is empty (disabled). Set it with `heroku config:set` and restart as in the sections above.
+
 #### Enable the internal token screen
 
 1. In the GitHub App settings, add `https://<app-host>/claude-token/callback` as a user authorization callback

@@ -10,8 +10,8 @@ CHATGPT_PLAN_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
 class ChatGPTPlanAIHandler(ClaudeCodeAIHandler):
-    def __init__(self, *, access_token: str, account_id: str, token: str):
-        super().__init__(token=token)
+    def __init__(self, *, access_token: str, account_id: str, token: str, credential_owner: str = ""):
+        super().__init__(token=token, credential_owner=credential_owner)
         self._plan_access_token = access_token
         self._plan_account_id = account_id
 
@@ -51,5 +51,5 @@ class ChatGPTPlanAIHandler(ClaudeCodeAIHandler):
             "completion_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens,
         } if usage else None)
-        record_model_source(model, response.model or model_id, "ChatGPT plan token")
+        record_model_source(model, response.model or model_id, f"{self._credential_owner}ChatGPT plan token")
         return response.output_text, "stop"
