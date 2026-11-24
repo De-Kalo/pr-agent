@@ -1,0 +1,97 @@
+# Requires repo secret HEROKU_API_KEY (Heroku API token with deploy access to pr-agent-app).
+name: Deploy-to-Heroku
+
+on:
+  workflow_run:
+    workflows: ["Build-and-test"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heroku-deploy-pr-agent-app
+  cancel-in-progress: false
+
+env:
+  HEROKU_APP: pr-agent-app
+
+jobs:
+  deploy:
+    # Only after a successful push-to-main build; manual runs always allowed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check secret
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          if [ -z "$HEROKU_API_KEY" ]; then
+            echo "::error::Repo secret HEROKU_API_KEY is not set. Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
+          fetch-depth: 0
+
+      - name: Resolve sha
+        run: echo "DEPLOY_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # Builds can finish out of order; never roll back to a commit older than the one already live.
+      - name: Skip if an equal or newer commit is already deployed
+        id: guard
+        if: github.event_name == 'workflow_run'
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          H=(-H "Authorization: Bearer ${HEROKU_API_KEY}" -H "Accept: application/vnd.heroku+json; version=3")
+          SLUG=$(curl -fsS "${H[@]}" -H "Range: version ..; order=desc,max=1" "https://api.heroku.com/apps/${HEROKU_APP}/releases" | jq -r '.[0].slug.id // empty')
+          LIVE=""
+          if [ -n "$SLUG" ]; then
+            LIVE=$(curl -fsS "${H[@]}" "https://api.heroku.com/apps/${HEROKU_APP}/slugs/${SLUG}" | jq -r '.commit // empty')
+          fi
+          if [ -n "$LIVE" ] && git cat-file -e "${LIVE}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$DEPLOY_SHA" "$LIVE"; then
+            echo "Live commit ${LIVE} already contains ${DEPLOY_SHA}; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply config vars (set only, never unset)
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: python3 -I deploy/apply_config.py deploy/heroku-config.env "$HEROKU_APP"
+
+      - name: Release (push to Heroku)
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          git push "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${HEROKU_APP}.git" "${DEPLOY_SHA}:refs/heads/main" --force
+
+      - name: Smoke check and summary
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          H=(-H "Authorization: Bearer ${HEROKU_API_KEY}" -H "Accept: application/vnd.heroku+json; version=3")
+          URL=$(curl -fsS "${H[@]}" "https://api.heroku.com/apps/${HEROKU_APP}" | jq -r .web_url)
+          ok=0
+          for _ in $(seq 1 12); do
+            if curl -fsS --max-time 15 "${URL}" | jq -e '.status == "ok"' >/dev/null; then ok=1; break; fi
+            sleep 10
+          done
+          REL=$(curl -fsS "${H[@]}" -H "Range: version ..; order=desc,max=1" "https://api.heroku.com/apps/${HEROKU_APP}/releases" | jq -r '.[0] | "v\(.version) (\(.status))"')
+          {
+            echo "### Heroku deploy: ${HEROKU_APP}"
+            echo "- Deployed sha: \`${DEPLOY_SHA}\`"
+            echo "- Latest release: ${REL}"
+            echo "- Smoke check \`GET ${URL}\`: $([ $ok = 1 ] && echo passed || echo FAILED)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ $ok = 1 ] || { echo "::error::Smoke check failed"; exit 1; }

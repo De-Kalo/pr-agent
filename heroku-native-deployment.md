@@ -115,7 +115,7 @@ only for allowlisted bots opening a PR that carries a marker.
 | --- | --- |
 | `GITHUB_APP__REQUESTER_DELEGATING_BOTS` | `["dbarnacle-bots-de-kalo[bot]"]` |
 
-The default is empty (disabled). Set it with `heroku config:set` and restart as in the sections above.
+The default is empty (disabled). It is set in `deploy/heroku-config.env` (see Deploy to Heroku).
 
 #### Enable the internal token screen
 
@@ -148,15 +148,24 @@ still provision tokens using the config vars.
 
 [Claude Code setup-token documentation](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)
 
-### 3. Deploy to Heroku
+### 3. Deploy to Heroku (automated, no hand pushes)
 
-```bash
-# Deploy using Git
-git push heroku main
+Deploys and non-secret config go through the repo. Do not run `git push heroku` or `heroku config:set` by hand.
 
-# Or if your Heroku remote has a different name:
-# git push heroku main:main
-```
+- **Workflow**: `.github/workflows/heroku-deploy.yml`.
+  It runs after `Build-and-test` succeeds on `main`, or manually through **Run workflow** (`workflow_dispatch`, deploys `main`).
+  Runs share the concurrency group `heroku-deploy-pr-agent-app` and queue; a deploy in progress is never cancelled.
+- **Secret**: repo secret `HEROKU_API_KEY` (a Heroku API token with deploy access to `pr-agent-app`, e.g. from
+  `heroku authorizations:create`). The job fails with a clear error if it is missing.
+- **Config as code**: `deploy/heroku-config.env` holds non-secret config vars (`KEY=VALUE` per line, literal values).
+  The workflow applies them with the Heroku API before the release. It only sets listed keys and never unsets vars
+  that are absent from the file. Secrets (tokens, keys, webhook/session secrets, AWS credentials) never go in this file
+  (the apply script rejects secret-looking names); set them in Heroku directly. To change config, edit the file in a PR.
+- **Order guard**: a `workflow_run` deploy is skipped when the live slug commit already contains the sha, so builds finishing out of order never roll production back.
+- **After release**: the job polls the app root (`GET /`, expects `{"status": "ok"}`) and writes the deployed sha and
+  release version to the job summary.
+
+Rollback: revert the commit on `main`, or re-run the workflow after fixing the file.
 
 ### 4. Verify Deployment
 
