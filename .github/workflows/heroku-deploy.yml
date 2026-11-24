@@ -1,4 +1,3 @@
-# Install as .github/workflows/heroku-deploy.yml (kept here because the PR that adds it may not touch .github/workflows).
 # Requires repo secret HEROKU_API_KEY (Heroku API token with deploy access to pr-agent-app).
 name: Deploy-to-Heroku
 

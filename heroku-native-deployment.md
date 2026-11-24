@@ -152,7 +152,7 @@ still provision tokens using the config vars.
 
 Deploys and non-secret config go through the repo. Do not run `git push heroku` or `heroku config:set` by hand.
 
-- **Workflow**: `deploy/heroku-deploy.workflow.yml`, installed as `.github/workflows/heroku-deploy.yml`.
+- **Workflow**: `.github/workflows/heroku-deploy.yml`.
   It runs after `Build-and-test` succeeds on `main`, or manually through **Run workflow** (`workflow_dispatch`, deploys `main`).
   Runs share the concurrency group `heroku-deploy-pr-agent-app` and queue; a deploy in progress is never cancelled.
 - **Secret**: repo secret `HEROKU_API_KEY` (a Heroku API token with deploy access to `pr-agent-app`, e.g. from

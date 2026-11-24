@@ -1,7 +1,7 @@
 """Apply non-secret config vars to a Heroku app. PATCH semantics: only listed keys are set, none are unset."""
 import json, os, re, sys, urllib.request
 
-SECRET = re.compile(r"(TOKEN(?!S$)|SECRET|PASSWORD|PRIVATE_KEY|API_KEY|(^|_)KEY$)", re.I)
+SECRET = re.compile(r"(TOKEN(?!S$)|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL|(^|_)KEY$|(^|_)KEY_ID$)", re.I)
 
 
 def parse(path):
