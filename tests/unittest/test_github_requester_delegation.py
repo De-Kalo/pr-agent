@@ -52,8 +52,17 @@ def _comment_body(commenter_id, *, pr_body=GOOD, author=(BOT, 500, "Bot")):
     [
         # automatic path
         (_pr_body(), (7, 42, True)),
-        (_pr_body("ready_for_review"), (7, 42, True)),
-        (_pr_body("reopened"), None),  # only opened / ready_for_review
+        # only "opened": on later events a human may have edited the marker into the body before the bot acted
+        (_pr_body("ready_for_review"), None),
+        (_pr_body("edited"), None),
+        (_pr_body("synchronize"), None),
+        (_pr_body("reopened"), None),
+        (_pr_body("ready_for_review", sender=("human", 99, "User")), None),
+        (_pr_body("edited", sender=("human", 99, "User")), None),  # a human inserting someone else's marker
+        (_pr_body(sender=(BOT, 500, "User")), None),  # bot's id but not a Bot sender
+        (_pr_body(sender=(BOT, 501, "Bot")), None),  # bot's login but a different id
+        # allowlisted login but not a Bot: the marker is ignored, only the author's own tokens apply
+        (_pr_body(author=(BOT, 500, "User"), sender=(BOT, 500, "User")), (7, 500, False)),
         (_pr_body(sender=("human", 99, "User")), None),  # a human edit or toggle cannot redirect spending
         (_pr_body("opened", sender=("other[bot]", 501, "Bot")), None),  # a different bot
         (_pr_body(author=("human", 99, "User"), sender=("human", 99, "User")), (7, 99, False)),  # marker ignored
@@ -65,6 +74,11 @@ def _comment_body(commenter_id, *, pr_body=GOOD, author=(BOT, 500, "Bot")):
         (_pr_body(pr_body='<!-- imparity-requested-by: {"githubId":"42"} -->'), None),
         (_pr_body(pr_body='<!-- imparity-requested-by: {"githubId":true} -->'), None),
         (_pr_body(pr_body='<!-- imparity-requested-by: {"githubId":-1} -->'), None),
+        (_pr_body(pr_body='<!-- imparity-requested-by: {"githubId":0} -->'), None),
+        (_pr_body(pr_body='<!-- imparity-requested-by: {"githubId":42.0} -->'), None),
+        # more than one marker: text a requester controls could precede the bot's own marker
+        (_pr_body(pr_body=GOOD.replace("42", "99") + "\n" + GOOD), None),
+        (_pr_body(pr_body=GOOD + "\n" + GOOD), None),
         (_pr_body(pr_body='<!-- imparity-requested-by: [42] -->'), None),
         (_pr_body(pr_body=None), None),
         (_pr_body(pr_body="no marker"), None),
@@ -74,6 +88,7 @@ def _comment_body(commenter_id, *, pr_body=GOOD, author=(BOT, 500, "Bot")):
         (_comment_body(42, author=("human", 99, "User")), None),  # marker on a human PR
         (_comment_body(42, author=("other[bot]", 501, "Bot")), None),
         (_comment_body(42, pr_body="<!-- imparity-requested-by: {oops} -->"), None),
+        (_comment_body(42, pr_body=GOOD.replace("42", "99") + GOOD), None),
     ],
 )
 def test_identity(monkeypatch, body, expected):
@@ -85,6 +100,21 @@ def test_disabled_by_default(monkeypatch):
     _settings(monkeypatch, bots=())
     assert github_app._pr_author_identity(_pr_body()) is None
     assert github_app._pr_author_identity(_comment_body(42)) is None
+    assert github_app._is_delegating_bot_pr_event(_pr_body(), "pull_request", "opened") is False
+
+
+def test_allowlist_as_bare_string(monkeypatch):
+    _settings(monkeypatch)
+    github_app.global_settings["github_app.requester_delegating_bots"] = BOT.upper()
+    assert github_app._pr_author_identity(_pr_body()) == (7, 42, True)
+
+
+async def test_disabled_allowlist_still_drops_bot_event(monkeypatch):
+    _settings(monkeypatch, bots=())
+    factory, delegated_agent, default_agent = await _dispatch_opened(monkeypatch, _pr_body())
+    factory.assert_called_once_with()  # only the default agent, built before the bot check
+    delegated_agent.handle_request.assert_not_awaited()
+    default_agent.handle_request.assert_not_awaited()
 
 
 async def _run_comment(monkeypatch, body):
@@ -141,12 +171,20 @@ async def _dispatch_opened(monkeypatch, body, action="opened"):
     return factory, delegated_agent, default_agent
 
 
-@pytest.mark.parametrize("action", ["opened", "ready_for_review"])
-async def test_bot_opened_pr_reviewed_on_requester_token(monkeypatch, action):
+async def test_bot_opened_pr_reviewed_on_requester_token(monkeypatch):
     _settings(monkeypatch)
-    factory, delegated_agent, default_agent = await _dispatch_opened(monkeypatch, _pr_body(action), action)
+    factory, delegated_agent, default_agent = await _dispatch_opened(monkeypatch, _pr_body())
     assert factory.call_args.kwargs["ai_handler"].keywords["token"] == "alice-token"
     assert delegated_agent.handle_request.await_count == 1
+    default_agent.handle_request.assert_not_awaited()
+
+
+async def test_bot_readied_pr_is_not_reviewed_on_requester_token(monkeypatch):
+    _settings(monkeypatch)
+    body = _pr_body("ready_for_review")
+    factory, delegated_agent, default_agent = await _dispatch_opened(monkeypatch, body, "ready_for_review")
+    factory.assert_called_once_with()  # still dropped as a bot event; only the default agent was built
+    delegated_agent.handle_request.assert_not_awaited()
     default_agent.handle_request.assert_not_awaited()
 
 
@@ -156,6 +194,7 @@ async def test_bot_opened_pr_reviewed_on_requester_token(monkeypatch, action):
         _pr_body(sender=("human", 99, "User")),
         _pr_body(pr_body="<!-- imparity-requested-by: {bad} -->"),
         _pr_body(author=("human", 99, "User"), sender=("human", 99, "User")),
+        _pr_body(pr_body=GOOD.replace("42", "99") + GOOD),
     ],
 )
 async def test_spoofed_open_does_not_use_requester_token(monkeypatch, body):

@@ -104,12 +104,12 @@ PR body when it creates the PR:
 ```
 
 The requester's identity is used only when the PR author is in `github_app.requester_delegating_bots` and either
-the bot itself opened or readied the PR (event sender is the bot, so a human editing the body cannot redirect
-spending), or the requester named in the marker comments a command such as `/review`. A marker on any other PR,
-a malformed marker, or a commenter other than the requester changes nothing. The requester must have registered a
+the bot itself opened the PR (event sender is the bot, and the body is the one the bot wrote), or the requester named in the marker comments a command such as `/review`. A bot readying a draft does not
+qualify, because a human may have edited the body since it was opened; the requester comments `/review` instead.
+A marker on any other PR, a body with more than one marker, a malformed marker, or a commenter other than the requester changes nothing. The requester must have registered a
 token on the token screen; otherwise the regular chain runs. The footer reads **requester's ChatGPT plan token**
 (or **requester's Claude Code setup token**). Bot-opened events are processed even with `ignore_bot_pr` on, but
-only for allowlisted bots opening or readying a PR that carries a marker.
+only for allowlisted bots opening a PR that carries a marker.
 
 | Config var | Example value |
 | --- | --- |

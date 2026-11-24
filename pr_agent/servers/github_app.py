@@ -388,7 +388,7 @@ def is_bot_user(sender, sender_type):
 
 
 def _is_delegating_bot_pr_event(body: dict, event: str, action: str) -> bool:
-    """Whether an allowlisted bot just opened or readied its own PR, which carries a requester to review for."""
+    """Whether an allowlisted bot just opened its own PR, which carries a requester to review for."""
     return event == "pull_request" and action in _REQUESTER_ACTIONS and _requester_identity(body) is not None
 
 
@@ -492,18 +492,20 @@ def _check_pull_request_event(action: str, body: dict, log_context: dict) -> Tup
 
 
 _REQUESTER_MARKER = re.compile(r"<!--\s*imparity-requested-by:\s*(\{.*?\})\s*-->", re.DOTALL)
-_REQUESTER_ACTIONS = ("opened", "ready_for_review")
+# Only "opened": its body is what the bot itself wrote. On later events (ready_for_review, edited, ...) the body may
+# have been edited by a human since, and the payload cannot say who wrote the marker.
+_REQUESTER_ACTIONS = ("opened",)
 
 
 def _requester_marker_id(pr_body) -> int | None:
-    """Return the githubId from the first well-formed requester marker in a PR body, else None."""
+    """Return the githubId from the PR body's single well-formed requester marker, else None (none or several)."""
     if not isinstance(pr_body, str):
         return None
-    match = _REQUESTER_MARKER.search(pr_body)
-    if not match:
+    matches = _REQUESTER_MARKER.findall(pr_body)
+    if len(matches) != 1:
         return None
     try:
-        marker = json.loads(match.group(1))
+        marker = json.loads(matches[0])
     except ValueError:
         return None
     requester_id = marker.get("githubId") if isinstance(marker, dict) else None
@@ -514,7 +516,7 @@ def _requester_identity(body: dict) -> int | None:
     """
     Return the requester's GitHub id for a PR written by an allowlisted bot on someone's behalf.
 
-    Only two events qualify: the bot itself opening or readying its own PR, or the requester named in the
+    Only two events qualify: the bot itself opening its own PR, or the requester named in the
     marker commenting on it. Anyone else, and every PR not authored by an allowlisted bot, gets None.
     """
     bots = global_settings.get("github_app.requester_delegating_bots") or []
