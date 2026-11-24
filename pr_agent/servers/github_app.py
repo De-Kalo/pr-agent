@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import json
 import os
+import re
 import time
 import uuid
 from functools import partial
@@ -385,6 +387,11 @@ def is_bot_user(sender, sender_type):
     return False
 
 
+def _is_delegating_bot_pr_event(body: dict, event: str, action: str) -> bool:
+    """Whether an allowlisted bot just opened its own PR, which carries a requester to review for."""
+    return event == "pull_request" and action in _REQUESTER_ACTIONS and _requester_identity(body) is not None
+
+
 def should_process_pr_logic(body) -> bool:
     return shared_should_process_pr_logic(body, provider="github")
 
@@ -395,7 +402,8 @@ async def _dispatch_request(body: Dict[str, Any], event: str, action: str):
     log_context, sender, sender_id, sender_type = get_log_context(body, event, action, build_number)
 
     # logic to ignore PRs opened by bot, PRs with specific titles, labels, source branches, or target branches
-    if is_bot_user(sender, sender_type) and 'check_run' not in body:
+    if (is_bot_user(sender, sender_type) and 'check_run' not in body
+            and not _is_delegating_bot_pr_event(body, event, action)):
         get_logger().debug("Request ignored: bot user detected")
         return {}
     if action != 'created' and 'check_run' not in body:
@@ -483,27 +491,91 @@ def _check_pull_request_event(action: str, body: dict, log_context: dict) -> Tup
     return pull_request, api_url
 
 
-def _pr_author_identity(body: dict) -> tuple[int, int] | None:
-    """Return the PR author's identity only when the author also triggered the event."""
+_REQUESTER_MARKER = re.compile(r"<!--\s*imparity-requested-by:\s*(\{.*?\})\s*-->", re.DOTALL)
+# Only "opened": its body is what the bot itself wrote. On later events (ready_for_review, edited, ...) the body may
+# have been edited by a human since, and the payload cannot say who wrote the marker.
+_REQUESTER_ACTIONS = ("opened",)
+
+
+def _requester_marker_id(pr_body) -> int | None:
+    """Return the githubId from the PR body's single well-formed requester marker, else None (none or several)."""
+    if not isinstance(pr_body, str):
+        return None
+    matches = _REQUESTER_MARKER.findall(pr_body)
+    if len(matches) != 1:
+        return None
+    try:
+        marker = json.loads(matches[0])
+    except ValueError:
+        return None
+    requester_id = marker.get("githubId") if isinstance(marker, dict) else None
+    return requester_id if type(requester_id) is int and requester_id > 0 else None
+
+
+def _requester_identity(body: dict) -> int | None:
+    """
+    Return the requester's GitHub id for a PR written by an allowlisted bot on someone's behalf.
+
+    Only two events qualify: the bot itself opening its own PR, or the requester named in the
+    marker commenting on it. Anyone else, and every PR not authored by an allowlisted bot, gets None.
+    """
+    bots = global_settings.get("github_app.requester_delegating_bots") or []
+    if isinstance(bots, str):
+        bots = [bots]
+    bots = {bot.lower() for bot in bots if isinstance(bot, str) and bot}
+    pr = body.get("pull_request") or body.get("issue") or {}
+    author = pr.get("user") or {}
+    author_login = author.get("login")
+    if (
+        not bots or not isinstance(author_login, str) or author_login.lower() not in bots
+        or author.get("type") != "Bot"
+    ):
+        return None
+    requester_id = _requester_marker_id(pr.get("body"))
+    if requester_id is None:
+        return None
+    sender = body.get("sender") or {}
+    if "comment" in body:
+        return requester_id if sender.get("id") == requester_id else None
+    if (
+        body.get("pull_request") and body.get("action") in _REQUESTER_ACTIONS
+        and type(author.get("id")) is int and sender.get("id") == author.get("id")
+        and sender.get("type") == "Bot"
+    ):
+        return requester_id
+    return None
+
+
+def _pr_author_identity(body: dict) -> tuple[int, int, bool] | None:
+    """
+    Return (installation_id, user_id, delegated) of the member whose tokens may pay for this event.
+
+    That is the PR author when the author also triggered the event, or, on an allowlisted bot's PR, the
+    requester named in its marker (see `_requester_identity`).
+    """
     # Pull request events carry the PR; comments on its conversation tab carry it as an issue.
     author = (body.get("pull_request") or body.get("issue") or {}).get("user") or {}
     author_id = author.get("id")
     installation_id = (body.get("installation") or {}).get("id")
     sender_id = (body.get("sender") or {}).get("id")
+    if type(installation_id) is not int or installation_id <= 0:
+        return None
+    requester_id = _requester_identity(body)
+    if requester_id is not None:
+        return installation_id, requester_id, True
     if (
         type(author_id) is not int or author_id <= 0 or author_id != sender_id
-        or type(installation_id) is not int or installation_id <= 0
         or author.get("type") != "User"
     ):
         return None
-    return installation_id, author_id
+    return installation_id, author_id, False
 
 
 async def _pr_author_claude_token(body: dict) -> str:
     identity = _pr_author_identity(body)
     if identity is None:
         return ""
-    installation_id, author_id = identity
+    installation_id, author_id, _ = identity
     if not global_settings.get("github_app.claude_token_org"):
         return os.environ.get(f"PR_AGENT_CLAUDE_TOKEN_{installation_id}_{author_id}", "").strip()
     if installation_id != global_settings.get("github_app.claude_token_installation_id"):
@@ -520,7 +592,7 @@ async def _pr_author_chatgpt_plan_credentials(body: dict) -> claude_token_portal
     if not identity or identity[0] != global_settings.get("github_app.claude_token_installation_id"):
         return None
     try:
-        return await asyncio.to_thread(claude_token_portal.get_registered_chatgpt_plan_credentials, *identity)
+        return await asyncio.to_thread(claude_token_portal.get_registered_chatgpt_plan_credentials, *identity[:2])
     except Exception:
         get_logger().warning("Could not load the author's ChatGPT plan token. Continuing with model fallback.")
         return None
@@ -530,21 +602,27 @@ async def _pr_author_backend(body: dict, agent: PRAgent) -> tuple[PRAgent, tuple
     """
     Use the PR author's own ChatGPT plan, then Claude Code, before the regular model chain.
     Applies only when the author triggered the event, so nobody can spend another member's plan.
+    On an allowlisted bot's PR the requester named in its marker takes the author's place (see
+    `_requester_identity`). Tokens exist only for org members who registered them, so a marker naming
+    anyone else finds nothing and the regular chain runs.
     """
+    identity = _pr_author_identity(body)
+    owner = "requester's " if identity and identity[2] else ""
     claude_model = plan_model = None
     claude_token = ""
     if global_settings.get("github_app.author_claude_tokens", False):
         claude_token = await _pr_author_claude_token(body)
         if claude_token:
             claude_model = global_settings.get("github_app.author_claude_model")
-            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=claude_token))
+            agent = PRAgent(ai_handler=partial(ClaudeCodeAIHandler, token=claude_token, credential_owner=owner))
     configured_plan_model = global_settings.get("github_app.author_chatgpt_plan_model")
     if configured_plan_model:
         plan = await _pr_author_chatgpt_plan_credentials(body)
         if plan:
             plan_model = f"{CHATGPT_PLAN_MODEL_PREFIX}{configured_plan_model}"
             agent = PRAgent(ai_handler=partial(
-                ChatGPTPlanAIHandler, access_token=plan.access_token, account_id=plan.account_id, token=claude_token
+                ChatGPTPlanAIHandler, access_token=plan.access_token, account_id=plan.account_id,
+                token=claude_token, credential_owner=owner,
             ))
     return agent, tuple(model for model in (plan_model, claude_model) if model)
 

@@ -367,6 +367,7 @@ _This section only documents commented-out examples; see the [TOML source](https
 | `author_claude_tokens` | false | Deployment-only opt-in to per-author Claude Code setup tokens for automatic PR commands. |
 | `author_claude_model` | "claude-sonnet-4-6" | Try this model before the regular model chain for registered authors. |
 | `author_chatgpt_plan_model` | "" | Deployment-only. Set a ChatGPT plan Codex model ID to try plan usage before Claude. |
+| `requester_delegating_bots` | [] | Bot logins whose PRs are reviewed on the requesting member's own tokens. The bot writes `<!-- imparity-requested-by: {"githubId":123,"login":"x","task":"<id>"} -->` in the PR body. Empty = disabled. Used only when the bot itself opens the PR, or when the requester comments a command. Exactly one marker allowed. Deployment example: ["dbarnacle-bots-de-kalo[bot]"]. |
 | `claude_token_org` | "" | Configure these deployment settings to enable internal self-service token registration. |
 | `claude_token_installation_id` | 0 |  |
 | `claude_token_callback_url` | "" |  |

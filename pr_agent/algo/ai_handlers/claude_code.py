@@ -12,9 +12,11 @@ from pr_agent.config_loader import get_settings
 
 
 class ClaudeCodeAIHandler(LiteLLMAIHandler):
-    def __init__(self, *, token: str):
+    def __init__(self, *, token: str, credential_owner: str = ""):
         super().__init__()
         self._token = token
+        # Prefix for the footer label, e.g. "requester's " when the PR's requester paid, not its author.
+        self._credential_owner = credential_owner
 
     async def chat_completion(self, model: str, system: str, user: str, temperature: float = 0.2, img_path: str = None):
         claude_model = model.removeprefix("anthropic/")
@@ -31,7 +33,7 @@ class ClaudeCodeAIHandler(LiteLLMAIHandler):
         if finish_reason == "length":
             raise FallbackEligibleError("Claude Code output was truncated.")
         record_ai_call()
-        record_model_source(model, claude_model, "Claude Code setup token")
+        record_model_source(model, claude_model, f"{self._credential_owner}Claude Code setup token")
         return result, finish_reason
 
 
