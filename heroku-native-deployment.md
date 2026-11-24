@@ -161,6 +161,7 @@ Deploys and non-secret config go through the repo. Do not run `git push heroku` 
   The workflow applies them with the Heroku API before the release. It only sets listed keys and never unsets vars
   that are absent from the file. Secrets (tokens, keys, webhook/session secrets, AWS credentials) never go in this file
   (the apply script rejects secret-looking names); set them in Heroku directly. To change config, edit the file in a PR.
+- **Order guard**: a `workflow_run` deploy is skipped when the live slug commit already contains the sha, so builds finishing out of order never roll production back.
 - **After release**: the job polls the app root (`GET /`, expects `{"status": "ok"}`) and writes the deployed sha and
   release version to the job summary.
 

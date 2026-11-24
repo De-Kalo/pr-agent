@@ -44,25 +44,46 @@ jobs:
       - name: Resolve sha
         run: echo "DEPLOY_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Builds can finish out of order; never roll back to a commit older than the one already live.
+      - name: Skip if an equal or newer commit is already deployed
+        id: guard
+        if: github.event_name == 'workflow_run'
+        env:
+          HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+        run: |
+          H=(-H "Authorization: Bearer ${HEROKU_API_KEY}" -H "Accept: application/vnd.heroku+json; version=3")
+          SLUG=$(curl -fsS "${H[@]}" -H "Range: version ..; order=desc,max=1" "https://api.heroku.com/apps/${HEROKU_APP}/releases" | jq -r '.[0].slug.id // empty')
+          LIVE=""
+          if [ -n "$SLUG" ]; then
+            LIVE=$(curl -fsS "${H[@]}" "https://api.heroku.com/apps/${HEROKU_APP}/slugs/${SLUG}" | jq -r '.commit // empty')
+          fi
+          if [ -n "$LIVE" ] && git cat-file -e "${LIVE}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$DEPLOY_SHA" "$LIVE"; then
+            echo "Live commit ${LIVE} already contains ${DEPLOY_SHA}; skipping." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Apply config vars (set only, never unset)
+        if: steps.guard.outputs.skip != 'true'
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
         run: python3 -I deploy/apply_config.py deploy/heroku-config.env "$HEROKU_APP"
 
       - name: Release (push to Heroku)
+        if: steps.guard.outputs.skip != 'true'
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
         run: |
           git push "https://heroku:${HEROKU_API_KEY}@git.heroku.com/${HEROKU_APP}.git" "${DEPLOY_SHA}:refs/heads/main" --force
 
       - name: Smoke check and summary
+        if: steps.guard.outputs.skip != 'true'
         env:
           HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
         run: |
           H=(-H "Authorization: Bearer ${HEROKU_API_KEY}" -H "Accept: application/vnd.heroku+json; version=3")
           URL=$(curl -fsS "${H[@]}" "https://api.heroku.com/apps/${HEROKU_APP}" | jq -r .web_url)
           ok=0
-          for i in $(seq 1 12); do
+          for _ in $(seq 1 12); do
             if curl -fsS --max-time 15 "${URL}" | jq -e '.status == "ok"' >/dev/null; then ok=1; break; fi
             sleep 10
           done
