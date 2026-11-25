@@ -188,6 +188,33 @@ async def test_bot_readied_pr_is_not_reviewed_on_requester_token(monkeypatch):
     default_agent.handle_request.assert_not_awaited()
 
 
+@pytest.mark.parametrize("pr_body", [None, "no marker", "<!-- imparity-requested-by: {bad} -->"])
+async def test_bot_opened_pr_without_marker_gets_regular_review(monkeypatch, pr_body):
+    _settings(monkeypatch)
+    factory, delegated_agent, default_agent = await _dispatch_opened(monkeypatch, _pr_body(pr_body=pr_body))
+    factory.assert_called_once_with()  # no requester: nobody's own tokens, the regular chain reviews it
+    assert default_agent.handle_request.await_count == 1
+    delegated_agent.handle_request.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("body", "action"),
+    [
+        (_pr_body("ready_for_review", pr_body="no marker"), "ready_for_review"),
+        (_pr_body("synchronize", pr_body="no marker"), "synchronize"),
+        (_pr_body(pr_body="no marker", sender=(BOT, 501, "Bot")), "opened"),
+        (_pr_body(pr_body="no marker", author=("other[bot]", 501, "Bot"), sender=("other[bot]", 501, "Bot")),
+         "opened"),
+    ],
+)
+async def test_other_bot_events_without_marker_stay_ignored(monkeypatch, body, action):
+    _settings(monkeypatch)
+    factory, delegated_agent, default_agent = await _dispatch_opened(monkeypatch, body, action)
+    factory.assert_called_once_with()
+    default_agent.handle_request.assert_not_awaited()
+    delegated_agent.handle_request.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "body",
     [
