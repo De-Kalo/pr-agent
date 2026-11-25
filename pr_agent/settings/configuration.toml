@@ -354,6 +354,7 @@ author_chatgpt_plan_model = "" # Deployment-only. Set a ChatGPT plan Codex model
 # Bot logins whose PRs are reviewed on the requesting member's own tokens. The bot writes
 # `<!-- imparity-requested-by: {"githubId":123,"login":"x","task":"<id>"} -->` in the PR body. Empty = disabled.
 # Used only when the bot itself opens the PR, or when the requester comments a command. Exactly one marker allowed.
+# A PR the bot opens without a marker still gets the automatic review, on the regular model chain.
 # Deployment example: ["dbarnacle-bots-de-kalo[bot]"].
 requester_delegating_bots = []
 # Configure these deployment settings to enable internal self-service token registration.

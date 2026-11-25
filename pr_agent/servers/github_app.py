@@ -388,8 +388,11 @@ def is_bot_user(sender, sender_type):
 
 
 def _is_delegating_bot_pr_event(body: dict, event: str, action: str) -> bool:
-    """Whether an allowlisted bot just opened its own PR, which carries a requester to review for."""
-    return event == "pull_request" and action in _REQUESTER_ACTIONS and _requester_identity(body) is not None
+    """
+    Whether an allowlisted bot just opened its own PR. It is reviewed like any PR: on the requester's
+    tokens when its body names one (see `_requester_identity`), otherwise on the regular model chain.
+    """
+    return event == "pull_request" and action in _REQUESTER_ACTIONS and _delegating_bot_opened_own_pr(body)
 
 
 def should_process_pr_logic(body) -> bool:
@@ -512,6 +515,27 @@ def _requester_marker_id(pr_body) -> int | None:
     return requester_id if type(requester_id) is int and requester_id > 0 else None
 
 
+def _delegating_bot_login(author: dict) -> bool:
+    """Whether a PR author is a Bot account on `github_app.requester_delegating_bots`."""
+    bots = global_settings.get("github_app.requester_delegating_bots") or []
+    if isinstance(bots, str):
+        bots = [bots]
+    bots = {bot.lower() for bot in bots if isinstance(bot, str) and bot}
+    login = author.get("login")
+    return bool(bots) and isinstance(login, str) and login.lower() in bots and author.get("type") == "Bot"
+
+
+def _delegating_bot_opened_own_pr(body: dict) -> bool:
+    """Whether this event is an allowlisted bot opening its own PR (not a human edit or toggle)."""
+    pr = body.get("pull_request") or {}
+    author = pr.get("user") or {}
+    sender = body.get("sender") or {}
+    return (
+        bool(pr) and body.get("action") in _REQUESTER_ACTIONS and _delegating_bot_login(author)
+        and type(author.get("id")) is int and sender.get("id") == author.get("id") and sender.get("type") == "Bot"
+    )
+
+
 def _requester_identity(body: dict) -> int | None:
     """
     Return the requester's GitHub id for a PR written by an allowlisted bot on someone's behalf.
@@ -519,31 +543,15 @@ def _requester_identity(body: dict) -> int | None:
     Only two events qualify: the bot itself opening its own PR, or the requester named in the
     marker commenting on it. Anyone else, and every PR not authored by an allowlisted bot, gets None.
     """
-    bots = global_settings.get("github_app.requester_delegating_bots") or []
-    if isinstance(bots, str):
-        bots = [bots]
-    bots = {bot.lower() for bot in bots if isinstance(bot, str) and bot}
     pr = body.get("pull_request") or body.get("issue") or {}
-    author = pr.get("user") or {}
-    author_login = author.get("login")
-    if (
-        not bots or not isinstance(author_login, str) or author_login.lower() not in bots
-        or author.get("type") != "Bot"
-    ):
+    if not _delegating_bot_login(pr.get("user") or {}):
         return None
     requester_id = _requester_marker_id(pr.get("body"))
     if requester_id is None:
         return None
-    sender = body.get("sender") or {}
     if "comment" in body:
-        return requester_id if sender.get("id") == requester_id else None
-    if (
-        body.get("pull_request") and body.get("action") in _REQUESTER_ACTIONS
-        and type(author.get("id")) is int and sender.get("id") == author.get("id")
-        and sender.get("type") == "Bot"
-    ):
-        return requester_id
-    return None
+        return requester_id if (body.get("sender") or {}).get("id") == requester_id else None
+    return requester_id if _delegating_bot_opened_own_pr(body) else None
 
 
 def _pr_author_identity(body: dict) -> tuple[int, int, bool] | None:
